@@ -1,7 +1,6 @@
 from __future__ import annotations
 import sys
 import json
-import random
 import shutil
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
@@ -27,6 +26,7 @@ def sample_images(
     target_root: Path,
     num_samples: int,
     train_subpaths: Tuple[str, ...],
+    seed: int = 0,
     allowed_exts: Tuple[str, ...] = (".png", ".jpg", ".jpeg"),
     rename_images: bool = True,
 ) -> None:
@@ -56,10 +56,13 @@ def sample_images(
             print(f"[skip] {cat_name}: none of {list(train_subpaths)} contained images")
             continue
 
-        k = min(num_samples, len(imgs))
-        # selected = random.sample(imgs, k)
-        random.shuffle(imgs)
-        selected = imgs[:k]
+        imgs = sorted(imgs)
+        sample_start_idx = max(int(seed), 0)
+        selected_indices = [sample_start_idx + i * 3 for i in range(num_samples)]
+        selected = [imgs[idx] for idx in selected_indices if idx < len(imgs)]
+        k = len(selected)
+        if k < num_samples:
+            print(f"[warn] {cat_name}: selected {k}/{num_samples} from indices {selected_indices}")
 
         dest_dir = target_train_root / cat_name
         dest_dir.mkdir(parents=True, exist_ok=True)
@@ -74,7 +77,7 @@ def sample_images(
             new_name = (f"{start_idx + i:03d}{src.suffix.lower()}") if rename_images else src.name
             shutil.copy2(src, dest_dir / new_name)
 
-        print(f"[✓] {cat_name}: copied {k}/{len(imgs)} from '{chosen_subpath}'")
+        print(f"[ok] {cat_name}: copied {k}/{len(imgs)} from '{chosen_subpath}' using indices {selected_indices}")
 
 
 
@@ -88,7 +91,7 @@ class SamplerCfg:
     allowed_exts: List[str] = field(default_factory=lambda: [".png", ".jpg", ".jpeg"])
     rename_images: bool = True
 
-    seed: int | None = None
+    seed: int = 0
 
     user_config: str = ""
 
@@ -110,13 +113,13 @@ def _finalize_cfg(cfg: DictConfig) -> Dict[str, Any]:
 @hydra.main(version_base="1.3", config_path="../configs", config_name="sample_few_shot")
 def main(cfg: DictConfig) -> None:
     cfgd = _finalize_cfg(cfg)
-    random.seed(int(cfgd["seed"]))
 
     sample_images(
         source_root=Path(cfgd["source"]),
         target_root=Path(cfgd["target"]),
         num_samples=int(cfgd["num_samples"]),
         train_subpaths=tuple(cfgd["train_subpaths"]),
+        seed=int(cfgd.get("seed", 0)),
         allowed_exts=tuple(cfgd["allowed_exts"]),
         rename_images=bool(cfgd["rename_images"]),
     )
