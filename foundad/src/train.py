@@ -54,6 +54,7 @@ class Trainer:
             mode="train",
             root=dcfg["train_root"],
             batch_size=dcfg["batch_size"],
+            num_workers=dcfg.get("num_workers", 0),
             pin_mem=dcfg["pin_mem"],
             resize=mcfg["crop_size"],
             use_hflip=dcfg.get("use_hflip",False),
@@ -119,8 +120,9 @@ class Trainer:
         for ep in range(self.epochs):
             logger.info("Epoch %d", ep+1); self.sampler.set_epoch(ep); loss_m, time_m = AverageMeter(), AverageMeter()
             for itr, (imgs, labels, paths) in enumerate(self.loader):
+                _, imgs_abn = self.cutpaste(imgs, labels) # anomaly synthesis on CPU
                 imgs = imgs.to(self.device, non_blocking=True)
-                _, imgs_abn = self.cutpaste(imgs, labels) # anomaly synthesis
+                imgs_abn = imgs_abn.to(self.device, non_blocking=True)
                 def _step():
                     with autocast(dtype=torch.bfloat16, enabled=self.use_bf16):
                         if np.random.rand() < 0.5:
