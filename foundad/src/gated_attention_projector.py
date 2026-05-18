@@ -7,7 +7,7 @@ import torch
 from torch import Tensor, nn
 
 
-SUPPORTED_GATE_MODES = {"multiplication", "residual"}
+SUPPORTED_GATE_MODES = {"multiplication", "residual", "memory"}
 SUPPORTED_GATE_POSITIONS = ("pre_qkv", "q", "k", "v", "attn_output", "proj_output")
 POSITION_ALIASES = {
     "input": "pre_qkv",
@@ -95,9 +95,18 @@ class GateUnit(nn.Module):
         self.granularity = granularity
         self.activation = activation
         out_dim = dim if granularity == "elementwise" else 1
-        self.proj = nn.Linear(dim, out_dim)
-        nn.init.zeros_(self.proj.weight)
-        nn.init.constant_(self.proj.bias, init_bias)
+        if mode == "memory":
+            self.keep_proj = nn.Linear(dim, out_dim)
+            self.write_proj = nn.Linear(dim, out_dim)
+            self.candidate_proj = nn.Linear(dim, dim)
+            nn.init.zeros_(self.keep_proj.weight)
+            nn.init.constant_(self.keep_proj.bias, init_bias)
+            nn.init.zeros_(self.write_proj.weight)
+            nn.init.constant_(self.write_proj.bias, init_bias)
+        else:
+            self.proj = nn.Linear(dim, out_dim)
+            nn.init.zeros_(self.proj.weight)
+            nn.init.constant_(self.proj.bias, init_bias)
 
     def _activate(self, gate: Tensor) -> Tensor:
         if self.activation == "sigmoid":
@@ -110,7 +119,14 @@ class GateUnit(nn.Module):
             return gate
         raise ValueError(f"Unsupported gated_attention.activation: {self.activation}")
 
-    def forward(self, x: Tensor) -> Tensor:
+    def forward(self, x: Tensor, memory: Optional[Tensor] = None) -> Tensor:
+        if self.mode == "memory":
+            memory = x if memory is None else memory
+            keep = torch.sigmoid(self.keep_proj(memory))
+            write = torch.sigmoid(self.write_proj(memory))
+            candidate = torch.tanh(self.candidate_proj(x))
+            return keep * memory + write * candidate
+
         gate = self._activate(self.proj(x))
         if self.mode == "multiplication":
             return x * gate
@@ -174,31 +190,33 @@ class GatedSelfAttention(nn.Module):
         gated.proj.load_state_dict(attention.proj.state_dict())
         return gated
 
-    def _gate(self, position: str, x: Tensor) -> Tensor:
+    def _gate(self, position: str, x: Tensor, memory: Optional[Tensor] = None) -> Tensor:
         gate = self.gates[position] if position in self.gates else None
-        return gate(x) if gate is not None else x
+        return gate(x, memory=memory) if gate is not None else x
 
     def forward(self, x: Tensor, attn_bias=None) -> Tensor:
         if attn_bias is not None:
             raise AssertionError("GatedSelfAttention does not support nested tensor attention bias")
 
         B, N, C = x.shape
-        x = self._gate("pre_qkv", x)
+        memory = x
+        memory_heads = memory.reshape(B, N, self.num_heads, self.head_dim).permute(0, 2, 1, 3)
+        x = self._gate("pre_qkv", x, memory=memory)
         qkv = self.qkv(x).reshape(B, N, 3, self.num_heads, self.head_dim).permute(2, 0, 3, 1, 4)
 
-        q = self._gate("q", qkv[0]) * self.scale
-        k = self._gate("k", qkv[1])
-        v = self._gate("v", qkv[2])
+        q = self._gate("q", qkv[0], memory=memory_heads) * self.scale
+        k = self._gate("k", qkv[1], memory=memory_heads)
+        v = self._gate("v", qkv[2], memory=memory_heads)
 
         attn = q @ k.transpose(-2, -1)
         attn = attn.softmax(dim=-1)
         attn = self.attn_drop(attn)
 
         x = attn @ v
-        x = self._gate("attn_output", x)
+        x = self._gate("attn_output", x, memory=memory_heads)
         x = x.transpose(1, 2).reshape(B, N, C)
         x = self.proj(x)
-        x = self._gate("proj_output", x)
+        x = self._gate("proj_output", x, memory=memory)
         x = self.proj_drop(x)
         return x
 
