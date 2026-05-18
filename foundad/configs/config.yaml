@@ -58,6 +58,7 @@ data:
 optimization:
   weight_decay: 1e-4
   epochs: 2000
+  max_steps: 2001 # hard stop by optimizer steps; null/omit to train by epochs only
   lr: 0.001
   lr_config: const # const, cosine, step, cosine_warmup
   min_lr: 1e-4 # for cosine and cosine_warmup

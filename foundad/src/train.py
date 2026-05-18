@@ -83,6 +83,8 @@ class Trainer:
             gamma=ocfg.get("gamma", 0.1),                     # for step
         )
         self.epochs = ocfg["epochs"]
+        self.max_steps = ocfg.get("max_steps")
+        self.max_steps = int(self.max_steps) if self.max_steps is not None else None
         self.use_bf16 = mcfg["use_bfloat16"]
 
         # ---------- logging ----------
@@ -120,6 +122,9 @@ class Trainer:
         for ep in range(self.epochs):
             logger.info("Epoch %d", ep+1); self.sampler.set_epoch(ep); loss_m, time_m = AverageMeter(), AverageMeter()
             for itr, (imgs, labels, paths) in enumerate(self.loader):
+                if self.max_steps is not None and gstep >= self.max_steps:
+                    logger.info("Reached max_steps=%d. Stopping training.", self.max_steps)
+                    return
                 _, imgs_abn = self.cutpaste(imgs, labels) # anomaly synthesis on CPU
                 imgs = imgs.to(self.device, non_blocking=True)
                 imgs_abn = imgs_abn.to(self.device, non_blocking=True)
@@ -141,6 +146,9 @@ class Trainer:
                     logger.info("[E %d I %d] loss %.6f (avg %.6f) mem %.2fMB (%.1fms)", ep+1, itr, loss.item(), loss_m.avg, torch.cuda.max_memory_allocated()/1024**2, time_m.avg)
                     if grad_stats:
                         logger.info("    grad: [%.2e %.2e] (%.2e %.2e)", grad_stats.first_layer, grad_stats.last_layer, grad_stats.min, grad_stats.max)
+                if self.max_steps is not None and gstep >= self.max_steps:
+                    logger.info("Reached max_steps=%d. Stopping training.", self.max_steps)
+                    return
             logger.info(
                 "Epoch %d complete. Avg loss %.6f, lr %.6f",
                 ep + 1,
@@ -149,6 +157,12 @@ class Trainer:
             )
             if self.scheduler is not None:
                 self.scheduler.step()
+        if self.max_steps is not None and gstep < self.max_steps:
+            logger.warning(
+                "Training ended at %d steps before max_steps=%d. Increase optimization.epochs or dataset size.",
+                gstep,
+                self.max_steps,
+            )
 
 def main(args: Dict[str, Any]) -> None:
     if args is None:
