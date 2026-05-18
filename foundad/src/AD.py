@@ -31,6 +31,7 @@ def _build_model(meta: Dict[str, Any]) -> VisionModule:
         if_pe=meta.get("if_pred_pe", True),
         feat_normed=meta.get("feat_normed", False),
         gated_attention=meta.get("gated_attention"),
+        weights=meta.get("weights"),
     )
 
 @torch.inference_mode()

@@ -9,6 +9,7 @@ meta:
   n_layer: 3
   feat_normed: false
   loss_mode: 'l2'  # l2 or smooth_l1
+  weights: null  # required for dinov3; local path or URL
   gated_attention:
     enabled: false
     mode: multiplication  # multiplication or residual

@@ -33,8 +33,10 @@ class VisionModule(nn.Module):
         if_pe: bool = True,
         feat_normed: bool = False,
         gated_attention: Optional[Dict[str, Any]] = None,
+        weights: Optional[str] = None,
     ):
         super().__init__()
+        self.weights = weights
         (self.encoder, self.num_patches, self.embed_dim, self.processor, self.projector) = self._build_encoder(model_name)
         self.model_name = model_name
 
@@ -66,7 +68,9 @@ class VisionModule(nn.Module):
         if model == "dinov2":
             enc = torch.hub.load("facebookresearch/dinov2", "dinov2_vitb14").eval(); num_patches, embed_dim = enc.patch_embed.num_patches, enc.embed_dim
         elif model == "dinov3":
-            enc = torch.hub.load("facebookresearch/dinov3", 'dinov3_vitb16', source="github").eval()
+            if not self.weights:
+                raise ValueError("meta.weights is required when meta.model is 'dinov3'")
+            enc = torch.hub.load("facebookresearch/dinov3", "dinov3_vitb16", source="github", weights=self.weights).eval()
             num_patches, embed_dim = enc.patch_embed.num_patches, enc.embed_dim
         elif model == "dino":
             enc = torch.hub.load("facebookresearch/dino:main", "dino_vitb16").eval(); num_patches, embed_dim = 1024, enc.embed_dim
