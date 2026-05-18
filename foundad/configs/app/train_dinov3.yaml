@@ -17,6 +17,11 @@ meta:
     granularity: elementwise  # elementwise, headwise, or token
     activation: sigmoid
     init_bias: 0.0
+    supervision:
+      enabled: false
+      loss_weight: 0.1
+      anomaly_weight: 4.0
+      positions: null  # null supervises all active gate positions
 
 logging:
   folder: logs/${data.data_name}/${app.meta.model}${oc.select:diy_name,""}

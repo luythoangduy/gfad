@@ -14,6 +14,7 @@ from src.utils.logging import CSVLogger, gpu_timer, grad_logger, AverageMeter
 from src.datasets.dataset import build_dataloader
 from src.utils.synthesis import CutPasteUnion
 from src.foundad import VisionModule
+from src.gated_attention_projector import gate_supervision_loss
 
 _GLOBAL_SEED = 0
 random.seed(42); np.random.seed(0); torch.manual_seed(0)
@@ -47,6 +48,11 @@ class Trainer:
             self.model.projector.requires_grad_(True)
         self.loss_mode = args["meta"].get("loss_mode", "l2") # l2 or smooth_l1
         logger.info(f"Loss mode {self.loss_mode}")
+        gate_supervision_cfg = mcfg.get("gated_attention", {}).get("supervision", {})
+        self.gate_supervision_enabled = bool(gate_supervision_cfg.get("enabled", False))
+        self.gate_supervision_weight = float(gate_supervision_cfg.get("loss_weight", 0.1))
+        self.gate_supervision_anomaly_weight = float(gate_supervision_cfg.get("anomaly_weight", 4.0))
+        self.gate_supervision_positions = gate_supervision_cfg.get("positions")
 
         # ---------- data ----------
         dcfg = args["data"]
@@ -126,16 +132,30 @@ class Trainer:
                 if self.max_steps is not None and gstep >= self.max_steps:
                     logger.info("Reached max_steps=%d. Stopping training.", self.max_steps)
                     return
-                _, imgs_abn = self.cutpaste(imgs, labels) # anomaly synthesis on CPU
+                _, imgs_abn, anomaly_masks = self.cutpaste(imgs, labels) # anomaly synthesis on CPU
                 imgs = imgs.to(self.device, non_blocking=True)
                 imgs_abn = imgs_abn.to(self.device, non_blocking=True)
+                anomaly_masks = anomaly_masks.to(self.device, non_blocking=True)
                 def _step():
                     with autocast(dtype=torch.bfloat16, enabled=self.use_bf16):
                         if np.random.rand() < 0.5:
                             h = self.model.target_features(imgs, paths, n_layer=self.n_layer); _, p = self.model.context_features(imgs, paths, n_layer=self.n_layer)
+                            gate_labels = torch.zeros_like(anomaly_masks)
                         else:
                             h = self.model.target_features(imgs, paths, n_layer=self.n_layer); _, p = self.model.context_features(imgs_abn, paths, n_layer=self.n_layer)
-                        return self._loss_fn(h, p,)
+                            gate_labels = anomaly_masks
+                        loss = self._loss_fn(h, p,)
+                        if self.gate_supervision_enabled:
+                            gate_loss = gate_supervision_loss(
+                                predictor=self.model.predictor,
+                                anomaly_mask=gate_labels,
+                                num_tokens=p.shape[1],
+                                positions=self.gate_supervision_positions,
+                                anomaly_weight=self.gate_supervision_anomaly_weight,
+                            )
+                            if gate_loss is not None:
+                                loss = loss + self.gate_supervision_weight * gate_loss
+                        return loss
                 (loss,), t = gpu_timer(lambda: [_step()])
                 if self.use_bf16: self.scaler.scale(loss).backward(); self.scaler.step(self.optimizer); self.scaler.update()
                 else: loss.backward(); self.optimizer.step()

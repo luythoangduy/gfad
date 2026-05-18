@@ -5,6 +5,7 @@ from typing import Any, Dict, Iterable, List, Mapping, Optional
 
 import torch
 from torch import Tensor, nn
+import torch.nn.functional as F
 
 
 SUPPORTED_GATE_MODES = {"multiplication", "residual"}
@@ -112,6 +113,7 @@ class GateUnit(nn.Module):
 
     def forward(self, x: Tensor) -> Tensor:
         gate = self._activate(self.proj(x))
+        self.last_gate = gate
         if self.mode == "multiplication":
             return x * gate
         if self.mode == "residual":
@@ -212,3 +214,60 @@ def apply_gated_attention_to_predictor(predictor: nn.Module, config: Optional[Ma
         block.attn = GatedSelfAttention.from_attention(block.attn, cfg)
     predictor.gated_attention_config = cfg
     return predictor
+
+
+def collect_gate_keep_maps(predictor: nn.Module, positions: Optional[Iterable[str]] = None) -> Optional[Tensor]:
+    if isinstance(positions, str):
+        positions = [positions]
+    if positions is not None:
+        positions = {_canonical_position(position) for position in positions}
+        if "all" in positions:
+            positions = None
+
+    gate_maps: List[Tensor] = []
+    for block in getattr(predictor, "predictor_blocks", []):
+        attn = getattr(block, "attn", None)
+        gates = getattr(attn, "gates", {})
+        for position, gate in gates.items():
+            if positions is not None and position not in positions:
+                continue
+            gate_value = getattr(gate, "last_gate", None)
+            if gate_value is None:
+                continue
+            if gate.activation != "sigmoid":
+                gate_value = torch.sigmoid(gate_value)
+            if gate_value.ndim == 4:
+                gate_value = gate_value.mean(dim=(1, 3))
+            elif gate_value.ndim == 3:
+                gate_value = gate_value.mean(dim=-1)
+            else:
+                continue
+            gate_maps.append(gate_value)
+
+    if not gate_maps:
+        return None
+    return torch.stack(gate_maps, dim=0).mean(dim=0)
+
+
+def gate_supervision_loss(
+    predictor: nn.Module,
+    anomaly_mask: Tensor,
+    num_tokens: int,
+    positions: Optional[Iterable[str]] = None,
+    anomaly_weight: float = 4.0,
+) -> Optional[Tensor]:
+    gate_keep = collect_gate_keep_maps(predictor, positions=positions)
+    if gate_keep is None:
+        return None
+
+    side = int(num_tokens**0.5)
+    if side * side != num_tokens:
+        raise ValueError(f"Cannot reshape {num_tokens} tokens into a square anomaly map")
+
+    gate_keep = gate_keep.float()
+    anomaly_tokens = F.interpolate(anomaly_mask.float(), size=(side, side), mode="area").flatten(1)
+    anomaly_tokens = (anomaly_tokens > 0).to(gate_keep.dtype)
+    keep_target = 1.0 - anomaly_tokens
+    weights = 1.0 + anomaly_tokens * float(anomaly_weight)
+    gate_keep = gate_keep.clamp(min=1e-4, max=1.0 - 1e-4)
+    return F.binary_cross_entropy(gate_keep, keep_target, weight=weights, reduction="mean")
