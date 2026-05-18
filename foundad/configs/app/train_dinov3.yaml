@@ -1,0 +1,22 @@
+# @package app
+meta:
+  model: 'dinov3'
+  crop_size: 512
+  pred_depth: 6
+  pred_emb_dim: 384
+  use_bfloat16: false
+  if_pred_pe: false
+  n_layer: 3
+  feat_normed: false
+  loss_mode: 'l2'  # l2 or smooth_l1
+  gated_attention:
+    enabled: false
+    mode: multiplication  # multiplication or residual
+    positions: [attn_output]  # pre_qkv, q, k, v, attn_output, proj_output, or [all]
+    granularity: elementwise  # elementwise, headwise, or token
+    activation: sigmoid
+    init_bias: 0.0
+
+logging:
+  folder: logs/${data.data_name}/${app.meta.model}${oc.select:diy_name,""}
+  write_tag: train
