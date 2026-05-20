@@ -35,10 +35,12 @@ class VisionModule(nn.Module):
         gated_attention: Optional[Dict[str, Any]] = None,
         backbone_gating: Optional[Dict[str, Any]] = None,
         weights: Optional[str] = None,
+        crop_size: Optional[int] = None,
     ):
         super().__init__()
         self.weights = weights
         (self.encoder, self.num_patches, self.embed_dim, self.processor, self.projector) = self._build_encoder(model_name)
+        self.num_patches = self._num_patches_for_crop(model_name, crop_size, self.num_patches)
         self.model_name = model_name
 
         self.predictor = vit.__dict__["vit_predictor"](num_patches=self.num_patches, embed_dim=self.embed_dim,
@@ -108,6 +110,22 @@ class VisionModule(nn.Module):
             for p in projector.parameters():
                 p.requires_grad = False
         return enc, num_patches, embed_dim, processor, projector
+
+    @staticmethod
+    def _num_patches_for_crop(model: str, crop_size: Optional[int], fallback: int) -> int:
+        if crop_size is None:
+            return fallback
+        patch_sizes = {
+            "dinov2": 14,
+            "dinov3": 16,
+            "dino": 16,
+            "siglip": 16,
+            "clip": 16,
+        }
+        patch_size = patch_sizes.get(model)
+        if patch_size is None:
+            return fallback
+        return (int(crop_size) // patch_size) ** 2
 
     def _extract(self, imgs: torch.Tensor, paths: List[str], n_layer: int = 3):
         if self.model_name == "dinov2":

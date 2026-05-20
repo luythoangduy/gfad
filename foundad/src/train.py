@@ -42,6 +42,7 @@ class Trainer:
             gated_attention=mcfg.get("gated_attention"),
             backbone_gating=mcfg.get("backbone_gating"),
             weights=mcfg.get("weights"),
+            crop_size=mcfg.get("crop_size"),
         )
         self.n_layer = args["meta"].get("n_layer", 3)
         self.model.requires_grad_(False)

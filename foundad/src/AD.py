@@ -33,7 +33,21 @@ def _build_model(meta: Dict[str, Any]) -> VisionModule:
         gated_attention=meta.get("gated_attention"),
         backbone_gating=meta.get("backbone_gating"),
         weights=meta.get("weights"),
+        crop_size=meta.get("crop_size"),
     )
+
+
+def _load_matching_state_dict(module: torch.nn.Module, state_dict: Dict[str, torch.Tensor], name: str) -> None:
+    current = module.state_dict()
+    compatible = {
+        key: value
+        for key, value in state_dict.items()
+        if key in current and current[key].shape == value.shape
+    }
+    skipped = sorted(set(state_dict) - set(compatible))
+    if skipped:
+        logger.warning("Skipping %d incompatible %s checkpoint tensors: %s", len(skipped), name, skipped)
+    module.load_state_dict(compatible, strict=False)
 
 
 def _latent_gate_error(
@@ -63,7 +77,7 @@ def _evaluate_single_ckpt(ckpt: Path, cfg: Dict[str, Any]) -> None:
     if state.get("backbone_gate") is not None and model.backbone_gate is not None:
         model.backbone_gate.load_state_dict(state["backbone_gate"])
     if "predictor" in state:
-        model.predictor.load_state_dict(state["predictor"], strict=False)
+        _load_matching_state_dict(model.predictor, state["predictor"], "predictor")
     if model.projector is not None:
         projector_state = state.get("projector")
         if projector_state is not None:
@@ -182,7 +196,7 @@ def _demo(ckpt: Path, cfg: Dict[str, Any]) -> None:
     if state.get("backbone_gate") is not None and model.backbone_gate is not None:
         model.backbone_gate.load_state_dict(state["backbone_gate"])
     if "predictor" in state:
-        model.predictor.load_state_dict(state["predictor"], strict=False)
+        _load_matching_state_dict(model.predictor, state["predictor"], "predictor")
     if model.projector is not None:
         projector_state = state.get("projector")
         if projector_state is not None:
