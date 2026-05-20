@@ -42,9 +42,12 @@ def _latent_gate_error(
     paths: List[str],
     n_layer: int,
     normalize: bool = True,
+    project_gated: bool = True,
 ) -> torch.Tensor:
     h_raw = model.target_features(img, paths, n_layer=n_layer)
     h_gated = model.apply_backbone_gate(h_raw)
+    if project_gated:
+        h_gated = model.predict(h_gated)
     if normalize:
         h_raw = F.layer_norm(h_raw, (h_raw.size(-1),))
         h_gated = F.layer_norm(h_gated, (h_gated.size(-1),))
@@ -71,6 +74,7 @@ def _evaluate_single_ckpt(ckpt: Path, cfg: Dict[str, Any]) -> None:
     crop = cfg["meta"]["crop_size"]
     n_layer = cfg["meta"].get("n_layer", 3)
     latent_score_normalize = bool(cfg.get("testing", {}).get("latent_score_normalize", True))
+    project_gated = bool(cfg.get("testing", {}).get("project_gated_before_score", True))
 
     dataset_name = cfg["data"].get("dataset", "mvtec")
     if dataset_name == 'mvtec':
@@ -126,6 +130,7 @@ def _evaluate_single_ckpt(ckpt: Path, cfg: Dict[str, Any]) -> None:
                 paths=paths,
                 n_layer=n_layer,
                 normalize=latent_score_normalize,
+                project_gated=project_gated,
             )
 
             topk = torch.topk(l, K, dim=1).values.mean(dim=1)
@@ -188,6 +193,7 @@ def _demo(ckpt: Path, cfg: Dict[str, Any]) -> None:
     crop = cfg["meta"]["crop_size"]
     n_layer = cfg["meta"].get("n_layer", 3)
     latent_score_normalize = bool(cfg.get("testing", {}).get("latent_score_normalize", True))
+    project_gated = bool(cfg.get("testing", {}).get("project_gated_before_score", True))
     out_root = Path(cfg["logging"]["folder"]) / "heatmaps"
     out_root.mkdir(parents=True, exist_ok=True)
 
@@ -250,6 +256,7 @@ def _demo(ckpt: Path, cfg: Dict[str, Any]) -> None:
             paths=[str(path)],
             n_layer=n_layer,
             normalize=latent_score_normalize,
+            project_gated=project_gated,
         )
 
         h = w = int(math.sqrt(l.size(1)))

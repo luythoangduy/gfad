@@ -75,6 +75,7 @@ testing:
   max_steps: 200      
   segmentation_vis: True
   latent_score_normalize: True
+  project_gated_before_score: True
 
 devices: [cuda:0]
 
