@@ -17,7 +17,9 @@ from src.utils.metrics import (
 )
 from src.helper import save_segmentation_grid
 from src.utils.logging import CSVLogger
-from src.foundad import VisionModule          
+from src.foundad import VisionModule
+from src.masks import MultiBlockMaskGenerator
+from src.utils.tensors import apply_masks, repeat_interleave_batch
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 logger = logging.getLogger("evaluator")
@@ -34,6 +36,70 @@ def _build_model(meta: Dict[str, Any]) -> VisionModule:
         backbone_gating=meta.get("backbone_gating"),
         weights=meta.get("weights"),
     )
+
+
+def _build_mask_generator(model: VisionModule, cfg: Dict[str, Any]) -> MultiBlockMaskGenerator:
+    mask_cfg = cfg["meta"].get("ijepa_mask", {})
+    return MultiBlockMaskGenerator(
+        num_patches=model.num_patches,
+        enc_mask_scale=mask_cfg.get("enc_mask_scale", (0.85, 1.0)),
+        pred_mask_scale=mask_cfg.get("pred_mask_scale", (0.15, 0.2)),
+        aspect_ratio=mask_cfg.get("aspect_ratio", (0.75, 1.5)),
+        num_enc_masks=mask_cfg.get("num_enc_masks", 1),
+        num_pred_masks=mask_cfg.get("num_pred_masks", 4),
+        min_keep=mask_cfg.get("min_keep", 10),
+        allow_overlap=mask_cfg.get("allow_overlap", False),
+    )
+
+
+def _predictor_mask_error(
+    model: VisionModule,
+    img: torch.Tensor,
+    paths: List[str],
+    n_layer: int,
+    mask_generator: MultiBlockMaskGenerator,
+    mask_rounds: int,
+    context_mode: str = "gated",
+    target_layer_norm: bool = True,
+) -> torch.Tensor:
+    h_raw = model.target_features(img, paths, n_layer=n_layer)
+    h_target = F.layer_norm(h_raw, (h_raw.size(-1),)) if target_layer_norm else h_raw
+    if context_mode == "raw":
+        h_context = h_raw
+    elif context_mode == "gated":
+        h_context = model.apply_backbone_gate(h_raw)
+    else:
+        raise ValueError("testing.context_mode must be 'gated' or 'raw'")
+
+    B, N, _ = h_raw.shape
+    score_sum = h_raw.new_zeros((B, N))
+    score_count = h_raw.new_zeros((B, N))
+
+    for _ in range(mask_rounds):
+        masks_enc, masks_pred = mask_generator(batch_size=B, device=img.device)
+        target = apply_masks(h_target, masks_pred)
+        target = repeat_interleave_batch(target, B, repeat=len(masks_enc))
+        context = apply_masks(h_context, masks_enc)
+        pred = model.predictor(context, masks_enc, masks_pred)
+        err = F.mse_loss(pred, target, reduction="none").mean(dim=-1)
+
+        offset = 0
+        for pred_mask in masks_pred:
+            for _enc_mask in masks_enc:
+                err_block = err[offset : offset + B]
+                for b in range(B):
+                    score_sum[b].scatter_add_(0, pred_mask[b], err_block[b])
+                    score_count[b].scatter_add_(0, pred_mask[b], torch.ones_like(err_block[b]))
+                offset += B
+
+    observed = score_count > 0
+    scores = torch.zeros_like(score_sum)
+    scores[observed] = score_sum[observed] / score_count[observed]
+    if not bool(observed.all().item()):
+        for b in range(B):
+            fill = scores[b, observed[b]].mean() if bool(observed[b].any().item()) else scores.new_tensor(0.0)
+            scores[b, ~observed[b]] = fill
+    return scores
 
 @torch.inference_mode()
 def _evaluate_single_ckpt(ckpt: Path, cfg: Dict[str, Any]) -> None:
@@ -55,8 +121,10 @@ def _evaluate_single_ckpt(ckpt: Path, cfg: Dict[str, Any]) -> None:
 
     crop = cfg["meta"]["crop_size"]
     n_layer = cfg["meta"].get("n_layer", 3)
-
-    # error = cfg["meta"].get("loss_mode", "l2")
+    mask_generator = _build_mask_generator(model, cfg)
+    mask_rounds = int(cfg.get("testing", {}).get("mask_rounds", 16))
+    context_mode = str(cfg.get("testing", {}).get("context_mode", "gated")).lower()
+    target_layer_norm = bool(cfg["meta"].get("ijepa_mask", {}).get("target_layer_norm", True))
 
     dataset_name = cfg["data"].get("dataset", "mvtec")
     if dataset_name == 'mvtec':
@@ -106,10 +174,16 @@ def _evaluate_single_ckpt(ckpt: Path, cfg: Dict[str, Any]) -> None:
             mask = batch["mask"].to(device, non_blocking=True)
             paths = batch["image_path"]; labels.extend(batch["is_anomaly"]); name_buf.extend(batch["image_name"])
 
-            enc = model.target_features(img, paths, n_layer=n_layer)
-            gated = model.gated_features(img, paths, n_layer=n_layer)
-
-            l = F.mse_loss(enc, gated, reduction="none").mean(dim=2)
+            l = _predictor_mask_error(
+                model=model,
+                img=img,
+                paths=paths,
+                n_layer=n_layer,
+                mask_generator=mask_generator,
+                mask_rounds=mask_rounds,
+                context_mode=context_mode,
+                target_layer_norm=target_layer_norm,
+            )
 
             topk = torch.topk(l, K, dim=1).values.mean(dim=1)
             patch_scores.extend(topk.cpu())
@@ -170,6 +244,10 @@ def _demo(ckpt: Path, cfg: Dict[str, Any]) -> None:
 
     crop = cfg["meta"]["crop_size"]
     n_layer = cfg["meta"].get("n_layer", 3)
+    mask_generator = _build_mask_generator(model, cfg)
+    mask_rounds = int(cfg.get("testing", {}).get("mask_rounds", 16))
+    context_mode = str(cfg.get("testing", {}).get("context_mode", "gated")).lower()
+    target_layer_norm = bool(cfg["meta"].get("ijepa_mask", {}).get("target_layer_norm", True))
     out_root = Path(cfg["logging"]["folder"]) / "heatmaps"
     out_root.mkdir(parents=True, exist_ok=True)
 
@@ -226,10 +304,16 @@ def _demo(ckpt: Path, cfg: Dict[str, Any]) -> None:
     for i, path in enumerate(img_paths, 1):
         pil_orig, (W0, H0), img = _load_and_preprocess(path)
 
-        enc = model.target_features(img, [str(path)], n_layer=n_layer)      # [1, P, D]
-        gated = model.gated_features(img, [str(path)], n_layer=n_layer)     # [1, P, D]
-
-        l = F.mse_loss(enc, gated, reduction="none").mean(dim=2)            # [1, P]
+        l = _predictor_mask_error(
+            model=model,
+            img=img,
+            paths=[str(path)],
+            n_layer=n_layer,
+            mask_generator=mask_generator,
+            mask_rounds=mask_rounds,
+            context_mode=context_mode,
+            target_layer_norm=target_layer_norm,
+        )
 
         h = w = int(math.sqrt(l.size(1)))
         pix = F.interpolate(l.view(1, 1, h, w), size=img.shape[2:], mode="bilinear", align_corners=False)  # [1,1,H,W]

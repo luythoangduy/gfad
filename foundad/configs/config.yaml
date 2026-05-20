@@ -74,6 +74,8 @@ testing:
   expect_fpr: 0.3     
   max_steps: 200      
   segmentation_vis: True
+  mask_rounds: 16
+  context_mode: gated # gated or raw
 
 devices: [cuda:0]
 
