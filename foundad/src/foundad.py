@@ -10,7 +10,7 @@ import torch.nn.functional as F
 from src.utils.tensors import trunc_normal_
 from src.datasets.dataset import build_dataloader
 import src.dinov2.models.vision_transformer as vit
-from src.backbone_gate import build_backbone_gate
+from src.backbone_lora import build_backbone_lora
 from transformers import AutoProcessor, SiglipVisionModel, CLIPVisionModel
 
 
@@ -35,6 +35,7 @@ class VisionModule(nn.Module):
         feat_normed: bool = False,
         gated_attention: Optional[Dict[str, Any]] = None,
         backbone_gating: Optional[Dict[str, Any]] = None,
+        backbone_lora: Optional[Dict[str, Any]] = None,
         weights: Optional[str] = None,
         crop_size: Optional[int] = None,
     ):
@@ -48,8 +49,10 @@ class VisionModule(nn.Module):
                                                          predictor_embed_dim=pred_emb_dim, depth=pred_depth, if_pe=if_pe, feat_normed=feat_normed)
         self._init_predictor(self.predictor)
         if gated_attention and gated_attention.get("enabled", False):
-            print("Predictor gated_attention is ignored on this branch; use meta.backbone_gating instead.")
-        self.backbone_gate = build_backbone_gate(self.encoder, self.embed_dim, backbone_gating)
+            print("Predictor gated_attention is ignored on this branch; use meta.backbone_lora instead.")
+        if backbone_lora is None:
+            backbone_lora = backbone_gating
+        self.backbone_lora = build_backbone_lora(self.encoder, self.embed_dim, backbone_lora)
         self.dropout = nn.Dropout(0.2)
         if use_cuda and torch.cuda.is_available():
             self.cuda()
@@ -60,17 +63,20 @@ class VisionModule(nn.Module):
         return self.predictor(z)
     
     def target_features(self, images, paths, n_layer=3):
-        gate_context = self.backbone_gate.use_gates(False) if self.backbone_gate is not None else nullcontext()
-        with gate_context, torch.no_grad():
+        lora_context = self.backbone_lora.use_adapters(False) if self.backbone_lora is not None else nullcontext()
+        with lora_context, torch.no_grad():
+            return self._extract(images, paths, n_layer=n_layer)
+
+    def adapted_features(self, images, paths, n_layer=3):
+        lora_context = self.backbone_lora.use_adapters(True) if self.backbone_lora is not None else nullcontext()
+        with lora_context:
             return self._extract(images, paths, n_layer=n_layer)
 
     def gated_features(self, images, paths, n_layer=3):
-        gate_context = self.backbone_gate.use_gates(True) if self.backbone_gate is not None else nullcontext()
-        with gate_context:
-            return self._extract(images, paths, n_layer=n_layer)
+        return self.adapted_features(images, paths, n_layer=n_layer)
 
     def context_features(self, images, paths, n_layer=3):
-        z = self.gated_features(images, paths, n_layer=n_layer)
+        z = self.adapted_features(images, paths, n_layer=n_layer)
         p = self.predictor(self.dropout(z))
         return z, p
 

@@ -41,14 +41,15 @@ class Trainer:
             feat_normed=mcfg.get("feat_normed", False),
             gated_attention=mcfg.get("gated_attention"),
             backbone_gating=mcfg.get("backbone_gating"),
+            backbone_lora=mcfg.get("backbone_lora"),
             weights=mcfg.get("weights"),
             crop_size=mcfg.get("crop_size"),
         )
         self.n_layer = args["meta"].get("n_layer", 3)
         self.model.requires_grad_(False)
         self.model.predictor.requires_grad_(True)
-        if self.model.backbone_gate is not None:
-            self.model.backbone_gate.requires_grad_(True)
+        if self.model.backbone_lora is not None:
+            self.model.backbone_lora.requires_grad_(True)
         self.loss_mode = args["meta"].get("loss_mode", "l2") # l2 or smooth_l1
         logger.info(f"Loss mode {self.loss_mode}")
 
@@ -89,7 +90,7 @@ class Trainer:
 
         ocfg = args["optimization"]
         self.optimizer, self.scheduler, self.scaler = init_opt(
-            predictor=[self.model.predictor, self.model.backbone_gate],
+            predictor=[self.model.predictor, self.model.backbone_lora],
             wd=float(ocfg["weight_decay"]),
             lr=ocfg["lr"],
             lr_config=ocfg.get("lr_config", "const"),
@@ -131,7 +132,7 @@ class Trainer:
     def _save_ckpt(self, ep, step=None):
         name = f"{self.tag}-step{step}.pth.tar" if step else f"{self.tag}-ep{ep}.pth.tar"
         torch.save({"predictor": self.model.predictor.state_dict(),
-                    "backbone_gate": self.model.backbone_gate.state_dict() if self.model.backbone_gate else None,
+                    "backbone_lora": self.model.backbone_lora.state_dict() if self.model.backbone_lora else None,
                     "projector": self.model.projector.state_dict() if self.model.projector else None,
                     "epoch": ep, "lr": self.optimizer.param_groups[0]["lr"]}, self.ckpt_dir/name)
 
@@ -152,7 +153,7 @@ class Trainer:
                         h_target = apply_masks(h_target, masks_pred)
                         h_target = repeat_interleave_batch(h_target, imgs.size(0), repeat=len(masks_enc))
 
-                        z = self.model.gated_features(imgs, paths, n_layer=self.n_layer)
+                        z = self.model.adapted_features(imgs, paths, n_layer=self.n_layer)
                         z = apply_masks(z, masks_enc)
                         p = self.model.predictor(z, masks_enc, masks_pred)
                         return self._loss_fn(h_target, p)
@@ -161,8 +162,8 @@ class Trainer:
                 else: loss.backward(); self.optimizer.step()
                 grad_stats = grad_logger(
                     list(self.model.predictor.named_parameters())
-                    + [(f"backbone_gate.{n}", p) for n, p in self.model.backbone_gate.named_parameters()]
-                    if self.model.backbone_gate is not None
+                    + [(f"backbone_lora.{n}", p) for n, p in self.model.backbone_lora.named_parameters()]
+                    if self.model.backbone_lora is not None
                     else self.model.predictor.named_parameters()
                 ); self.optimizer.zero_grad()
                 loss_m.update(loss.item()); time_m.update(t); gstep += 1

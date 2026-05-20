@@ -10,13 +10,12 @@ meta:
   feat_normed: false
   loss_mode: 'smooth_l1'  # l2 or smooth_l1
   weights: null  # required for dinov3; local path or URL
-  backbone_gating:
+  backbone_lora:
     enabled: true
     layers: all  # all, last, last_N, an int, or a list of block indices
-    mode: multiplication  # multiplication or residual
-    granularity: elementwise  # elementwise or token
-    activation: sigmoid
-    init_bias: 2.0
+    rank: 16
+    alpha: 16.0
+    dropout: 0.0
   ijepa_mask:
     allow_overlap: false
     aspect_ratio: [0.75, 1.5]
