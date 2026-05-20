@@ -526,8 +526,9 @@ class VisionTransformerPredictor(nn.Module):
             x = x.repeat(len(masks), 1, 1)
             x = torch.cat([x, pred_tokens], dim=1)
 
+            residuals = x.clone()
             for blk in self.predictor_blocks:
-                x = blk(x)
+                x = blk(x) + residuals
             x = self.predictor_norm(x)
             x = x[:, N_ctxt:]
             x = self.predictor_proj(x)

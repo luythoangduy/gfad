@@ -2,7 +2,7 @@ import os
 import logging
 import math
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Tuple
 import numpy as np
 import torch
 import torch.nn.functional as F
@@ -52,6 +52,49 @@ def _build_mask_generator(model: VisionModule, cfg: Dict[str, Any]) -> MultiBloc
     )
 
 
+def _target_block_size(num_patches: int, cfg: Dict[str, Any]) -> Tuple[int, int]:
+    side = int(num_patches**0.5)
+    mask_cfg = cfg["meta"].get("ijepa_mask", {})
+    min_s, max_s = mask_cfg.get("pred_mask_scale", (0.15, 0.2))
+    min_ar, max_ar = mask_cfg.get("aspect_ratio", (0.75, 1.5))
+    scale = 0.5 * (float(min_s) + float(max_s))
+    aspect_ratio = 0.5 * (float(min_ar) + float(max_ar))
+    keep = max(1, int(side * side * scale))
+    h = max(1, min(side - 1, int(round(math.sqrt(keep * aspect_ratio)))))
+    w = max(1, min(side - 1, int(round(math.sqrt(keep / aspect_ratio)))))
+    return h, w
+
+
+def _grid_starts(side: int, block: int, stride: int) -> List[int]:
+    starts = list(range(0, max(side - block + 1, 1), stride))
+    last = side - block
+    if not starts or starts[-1] != last:
+        starts.append(last)
+    return starts
+
+
+def _grid_mask_pairs(
+    num_patches: int,
+    cfg: Dict[str, Any],
+    device: torch.device,
+) -> List[Tuple[List[torch.Tensor], List[torch.Tensor]]]:
+    side = int(num_patches**0.5)
+    block_h, block_w = _target_block_size(num_patches, cfg)
+    testing_cfg = cfg.get("testing", {})
+    stride_h = int(testing_cfg.get("mask_stride_h", max(1, block_h // 2)))
+    stride_w = int(testing_cfg.get("mask_stride_w", max(1, block_w // 2)))
+
+    pairs: List[Tuple[List[torch.Tensor], List[torch.Tensor]]] = []
+    for top in _grid_starts(side, block_h, stride_h):
+        for left in _grid_starts(side, block_w, stride_w):
+            region = torch.zeros((side, side), dtype=torch.bool, device=device)
+            region[top : top + block_h, left : left + block_w] = True
+            pred = torch.nonzero(region.flatten(), as_tuple=False).squeeze(1).unsqueeze(0)
+            enc = torch.nonzero((~region).flatten(), as_tuple=False).squeeze(1).unsqueeze(0)
+            pairs.append(([enc], [pred]))
+    return pairs
+
+
 def _predictor_mask_error(
     model: VisionModule,
     img: torch.Tensor,
@@ -61,6 +104,7 @@ def _predictor_mask_error(
     mask_rounds: int,
     context_mode: str = "gated",
     target_layer_norm: bool = True,
+    mask_pairs: List[Tuple[List[torch.Tensor], List[torch.Tensor]]] | None = None,
 ) -> torch.Tensor:
     h_raw = model.target_features(img, paths, n_layer=n_layer)
     h_target = F.layer_norm(h_raw, (h_raw.size(-1),)) if target_layer_norm else h_raw
@@ -75,8 +119,15 @@ def _predictor_mask_error(
     score_sum = h_raw.new_zeros((B, N))
     score_count = h_raw.new_zeros((B, N))
 
-    for _ in range(mask_rounds):
-        masks_enc, masks_pred = mask_generator(batch_size=B, device=img.device)
+    if mask_pairs is None:
+        mask_iter = [mask_generator(batch_size=B, device=img.device) for _ in range(mask_rounds)]
+    else:
+        mask_iter = mask_pairs
+
+    for masks_enc, masks_pred in mask_iter:
+        if masks_enc[0].size(0) != B:
+            masks_enc = [mask.expand(B, -1) for mask in masks_enc]
+            masks_pred = [mask.expand(B, -1) for mask in masks_pred]
         target = apply_masks(h_target, masks_pred)
         target = repeat_interleave_batch(target, B, repeat=len(masks_enc))
         context = apply_masks(h_context, masks_enc)
@@ -123,8 +174,10 @@ def _evaluate_single_ckpt(ckpt: Path, cfg: Dict[str, Any]) -> None:
     n_layer = cfg["meta"].get("n_layer", 3)
     mask_generator = _build_mask_generator(model, cfg)
     mask_rounds = int(cfg.get("testing", {}).get("mask_rounds", 16))
+    mask_strategy = str(cfg.get("testing", {}).get("mask_strategy", "grid")).lower()
     context_mode = str(cfg.get("testing", {}).get("context_mode", "gated")).lower()
     target_layer_norm = bool(cfg["meta"].get("ijepa_mask", {}).get("target_layer_norm", True))
+    grid_mask_pairs = _grid_mask_pairs(model.num_patches, cfg, device) if mask_strategy == "grid" else None
 
     dataset_name = cfg["data"].get("dataset", "mvtec")
     if dataset_name == 'mvtec':
@@ -183,6 +236,7 @@ def _evaluate_single_ckpt(ckpt: Path, cfg: Dict[str, Any]) -> None:
                 mask_rounds=mask_rounds,
                 context_mode=context_mode,
                 target_layer_norm=target_layer_norm,
+                mask_pairs=grid_mask_pairs,
             )
 
             topk = torch.topk(l, K, dim=1).values.mean(dim=1)
@@ -246,8 +300,10 @@ def _demo(ckpt: Path, cfg: Dict[str, Any]) -> None:
     n_layer = cfg["meta"].get("n_layer", 3)
     mask_generator = _build_mask_generator(model, cfg)
     mask_rounds = int(cfg.get("testing", {}).get("mask_rounds", 16))
+    mask_strategy = str(cfg.get("testing", {}).get("mask_strategy", "grid")).lower()
     context_mode = str(cfg.get("testing", {}).get("context_mode", "gated")).lower()
     target_layer_norm = bool(cfg["meta"].get("ijepa_mask", {}).get("target_layer_norm", True))
+    grid_mask_pairs = _grid_mask_pairs(model.num_patches, cfg, device) if mask_strategy == "grid" else None
     out_root = Path(cfg["logging"]["folder"]) / "heatmaps"
     out_root.mkdir(parents=True, exist_ok=True)
 
@@ -313,6 +369,7 @@ def _demo(ckpt: Path, cfg: Dict[str, Any]) -> None:
             mask_rounds=mask_rounds,
             context_mode=context_mode,
             target_layer_norm=target_layer_norm,
+            mask_pairs=grid_mask_pairs,
         )
 
         h = w = int(math.sqrt(l.size(1)))

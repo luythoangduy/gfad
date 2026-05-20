@@ -75,6 +75,7 @@ testing:
   max_steps: 200      
   segmentation_vis: True
   mask_rounds: 16
+  mask_strategy: grid # grid or random
   context_mode: gated # gated or raw
 
 devices: [cuda:0]
