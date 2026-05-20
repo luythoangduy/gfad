@@ -165,7 +165,7 @@ class Trainer:
                     + [(f"backbone_lora.{n}", p) for n, p in self.model.backbone_lora.named_parameters()]
                     if self.model.backbone_lora is not None
                     else self.model.predictor.named_parameters()
-                ); self.optimizer.zero_grad()
+                ); self.optimizer.zero_grad(set_to_none=True)
                 loss_m.update(loss.item()); time_m.update(t); gstep += 1
                 if gstep % 100 == 0: self._save_ckpt(ep, gstep)
                 self.csv_logger.log(ep+1, itr, loss.item(), t)

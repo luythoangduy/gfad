@@ -12,9 +12,10 @@ meta:
   weights: null  # required for dinov3; local path or URL
   backbone_lora:
     enabled: true
-    layers: all  # all, last, last_N, an int, or a list of block indices
-    rank: 16
-    alpha: 16.0
+    layers: last_1  # all, last, last_N, an int, or a list of block indices
+    target_modules: null  # null means every nn.Linear inside block.mlp
+    rank: 4
+    alpha: 4.0
     dropout: 0.0
   ijepa_mask:
     allow_overlap: false
