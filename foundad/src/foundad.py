@@ -1,5 +1,6 @@
 
 import multiprocessing as mp
+from contextlib import nullcontext
 from typing import Any, Dict, Tuple, Optional, List
 import importlib   
 import yaml, numpy as np, torch
@@ -48,7 +49,7 @@ class VisionModule(nn.Module):
         self._init_predictor(self.predictor)
         if gated_attention and gated_attention.get("enabled", False):
             print("Predictor gated_attention is ignored on this branch; use meta.backbone_gating instead.")
-        self.backbone_gate = build_backbone_gate(self.embed_dim, backbone_gating)
+        self.backbone_gate = build_backbone_gate(self.encoder, self.embed_dim, backbone_gating)
         self.dropout = nn.Dropout(0.2)
         if use_cuda and torch.cuda.is_available():
             self.cuda()
@@ -59,18 +60,14 @@ class VisionModule(nn.Module):
         return self.predictor(z)
     
     def target_features(self, images, paths, n_layer=3):
-        with torch.no_grad():
+        gate_context = self.backbone_gate.use_gates(False) if self.backbone_gate is not None else nullcontext()
+        with gate_context, torch.no_grad():
             return self._extract(images, paths, n_layer=n_layer)
 
     def gated_features(self, images, paths, n_layer=3):
-        with torch.no_grad():
-            z = self._extract(images, paths, n_layer=n_layer)
-        return self.apply_backbone_gate(z)
-
-    def apply_backbone_gate(self, z: torch.Tensor) -> torch.Tensor:
-        if self.backbone_gate is None:
-            return z
-        return self.backbone_gate(z)
+        gate_context = self.backbone_gate.use_gates(True) if self.backbone_gate is not None else nullcontext()
+        with gate_context:
+            return self._extract(images, paths, n_layer=n_layer)
 
     def context_features(self, images, paths, n_layer=3):
         z = self.gated_features(images, paths, n_layer=n_layer)

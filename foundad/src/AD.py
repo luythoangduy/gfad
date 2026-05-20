@@ -59,7 +59,7 @@ def _latent_gate_error(
     project_gated: bool = True,
 ) -> torch.Tensor:
     h_raw = model.target_features(img, paths, n_layer=n_layer)
-    h_gated = model.apply_backbone_gate(h_raw)
+    h_gated = model.gated_features(img, paths, n_layer=n_layer)
     if project_gated:
         h_gated = model.predict(h_gated)
     if normalize:
@@ -75,7 +75,7 @@ def _evaluate_single_ckpt(ckpt: Path, cfg: Dict[str, Any]) -> None:
     model = _build_model(cfg["meta"])
     state = torch.load(ckpt, map_location="cpu")
     if state.get("backbone_gate") is not None and model.backbone_gate is not None:
-        model.backbone_gate.load_state_dict(state["backbone_gate"])
+        _load_matching_state_dict(model.backbone_gate, state["backbone_gate"], "backbone_gate")
     if "predictor" in state:
         _load_matching_state_dict(model.predictor, state["predictor"], "predictor")
     if model.projector is not None:
@@ -194,7 +194,7 @@ def _demo(ckpt: Path, cfg: Dict[str, Any]) -> None:
     model = _build_model(cfg["meta"])
     state = torch.load(ckpt, map_location="cpu")
     if state.get("backbone_gate") is not None and model.backbone_gate is not None:
-        model.backbone_gate.load_state_dict(state["backbone_gate"])
+        _load_matching_state_dict(model.backbone_gate, state["backbone_gate"], "backbone_gate")
     if "predictor" in state:
         _load_matching_state_dict(model.predictor, state["predictor"], "predictor")
     if model.projector is not None:

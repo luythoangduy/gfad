@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from typing import Any, Mapping, Optional
+from contextlib import contextmanager
+from typing import Any, Iterable, Mapping, Optional
 
 import torch
 from torch import Tensor, nn
@@ -53,12 +54,108 @@ class BackboneFeatureGate(nn.Module):
         raise ValueError(f"Unsupported backbone_gating.mode: {self.mode}")
 
 
-def build_backbone_gate(dim: int, config: Optional[Mapping[str, Any]]) -> Optional[BackboneFeatureGate]:
+class InternalBackboneGate(nn.Module):
+    """Trainable gates injected into frozen ViT backbone blocks via forward hooks."""
+
+    def __init__(
+        self,
+        encoder: nn.Module,
+        dim: int,
+        layers: Any = "all",
+        mode: str = "multiplication",
+        granularity: str = "elementwise",
+        activation: str = "sigmoid",
+        init_bias: float = 2.0,
+    ) -> None:
+        super().__init__()
+        blocks = getattr(encoder, "blocks", None)
+        if blocks is None:
+            raise ValueError("Internal backbone gating currently requires encoder.blocks")
+        self.enabled = True
+        self.gates = nn.ModuleDict()
+        self._handles = []
+
+        resolved_layers = self._resolve_layers(layers, len(blocks))
+        for idx in resolved_layers:
+            key = str(idx)
+            self.gates[key] = BackboneFeatureGate(
+                dim=dim,
+                mode=mode,
+                granularity=granularity,
+                activation=activation,
+                init_bias=init_bias,
+            )
+            self._handles.append(blocks[idx].register_forward_hook(self._make_hook(key)))
+
+    @staticmethod
+    def _resolve_layers(layers: Any, depth: int) -> list[int]:
+        if layers is None:
+            layers = "all"
+        if isinstance(layers, str):
+            name = layers.lower()
+            if name == "all":
+                return list(range(depth))
+            if name == "last":
+                return [depth - 1]
+            if name.startswith("last_"):
+                count = int(name.split("_", 1)[1])
+                return list(range(max(depth - count, 0), depth))
+            layers = [int(name)]
+        elif isinstance(layers, int):
+            layers = [layers]
+        elif not isinstance(layers, Iterable):
+            raise ValueError("backbone_gating.layers must be 'all', 'last', 'last_N', an int, or a list of ints")
+
+        resolved = []
+        for layer in layers:
+            idx = int(layer)
+            if idx < 0:
+                idx = depth + idx
+            if idx < 0 or idx >= depth:
+                raise ValueError(f"backbone_gating layer {layer} is outside backbone depth {depth}")
+            resolved.append(idx)
+        return sorted(set(resolved))
+
+    def _make_hook(self, key: str):
+        def hook(_module, _inputs, output):
+            if not self.enabled:
+                return output
+            gate = self.gates[key]
+            if isinstance(output, tuple):
+                return (gate(output[0]), *output[1:])
+            if isinstance(output, list):
+                return [gate(output[0]), *output[1:]]
+            return gate(output)
+
+        return hook
+
+    @contextmanager
+    def use_gates(self, enabled: bool):
+        prev = self.enabled
+        self.enabled = enabled
+        try:
+            yield
+        finally:
+            self.enabled = prev
+
+    def remove_hooks(self) -> None:
+        for handle in self._handles:
+            handle.remove()
+        self._handles.clear()
+
+
+def build_backbone_gate(
+    encoder: nn.Module,
+    dim: int,
+    config: Optional[Mapping[str, Any]],
+) -> Optional[InternalBackboneGate]:
     cfg = dict(config or {})
     if not cfg.get("enabled", False):
         return None
-    return BackboneFeatureGate(
+    return InternalBackboneGate(
+        encoder=encoder,
         dim=dim,
+        layers=cfg.get("layers", "all"),
         mode=str(cfg.get("mode", "multiplication")).lower(),
         granularity=str(cfg.get("granularity", "elementwise")).lower(),
         activation=str(cfg.get("activation", "sigmoid")).lower(),

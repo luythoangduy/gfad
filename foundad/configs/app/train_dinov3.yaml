@@ -12,6 +12,7 @@ meta:
   weights: null  # required for dinov3; local path or URL
   backbone_gating:
     enabled: true
+    layers: all  # all, last, last_N, an int, or a list of block indices
     mode: multiplication  # multiplication or residual
     granularity: elementwise  # elementwise or token
     activation: sigmoid

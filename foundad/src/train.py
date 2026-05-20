@@ -152,7 +152,7 @@ class Trainer:
                         h_target = apply_masks(h_target, masks_pred)
                         h_target = repeat_interleave_batch(h_target, imgs.size(0), repeat=len(masks_enc))
 
-                        z = self.model.apply_backbone_gate(h_raw.detach())
+                        z = self.model.gated_features(imgs, paths, n_layer=self.n_layer)
                         z = apply_masks(z, masks_enc)
                         p = self.model.predictor(z, masks_enc, masks_pred)
                         return self._loss_fn(h_target, p)
