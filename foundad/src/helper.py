@@ -61,9 +61,23 @@ def init_opt(
     step_size=300,         # for step
     gamma=0.1,            # for step
 ):
+    if isinstance(predictor, (list, tuple)):
+        params = []
+        for item in predictor:
+            if item is None:
+                continue
+            if hasattr(item, "parameters"):
+                params.extend([p for p in item.parameters() if p.requires_grad])
+            else:
+                params.append(item)
+    else:
+        params = [p for p in predictor.parameters() if p.requires_grad]
+    if not params:
+        raise ValueError("No trainable parameters were provided to init_opt")
+
     param_groups = [
         {
-            'params': list(predictor.parameters()),
+            'params': params,
             'lr': lr,           
             'weight_decay': wd      
         }

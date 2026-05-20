@@ -21,6 +21,7 @@ import torch.utils.checkpoint
 from torch.nn.init import trunc_normal_
 
 from src.dinov2.layers import Mlp, PatchEmbed, SwiGLUFFNFused, MemEffAttention, NestedTensorBlock as Block, RopePositionEmbedding
+from src.utils.tensors import apply_masks, repeat_interleave_batch
 
 logger = logging.getLogger("dinov2")
 
@@ -494,10 +495,47 @@ class VisionTransformerPredictor(nn.Module):
             if m.bias is not None:
                 nn.init.constant_(m.bias, 0)
 
-    def forward(self, x):
+    def forward(self, x, masks_x=None, masks=None):
         B = x.size(0)
 
         x = self.predictor_embed(x)
+
+        if masks_x is not None or masks is not None:
+            if masks_x is None or masks is None:
+                raise ValueError("masks_x and masks must be provided together for masked predictor forward")
+            if not isinstance(masks_x, list):
+                masks_x = [masks_x]
+            if not isinstance(masks, list):
+                masks = [masks]
+
+            B = len(x) // len(masks_x)
+            if self.if_pe and self.predictor_pos_embed is not None:
+                x_pos_embed = self.predictor_pos_embed.repeat(B, 1, 1)
+                x = x + apply_masks(x_pos_embed, masks_x)
+
+                pos_embs = self.predictor_pos_embed.repeat(B, 1, 1)
+                pos_embs = apply_masks(pos_embs, masks)
+                pos_embs = repeat_interleave_batch(pos_embs, B, repeat=len(masks_x))
+            else:
+                pred_len = masks[0].shape[1]
+                pos_embs = x.new_zeros((B * len(masks) * len(masks_x), pred_len, x.size(-1)))
+
+            _, N_ctxt, _ = x.shape
+            pred_tokens = self.mask_token.repeat(pos_embs.size(0), pos_embs.size(1), 1)
+            pred_tokens = pred_tokens + pos_embs
+            x = x.repeat(len(masks), 1, 1)
+            x = torch.cat([x, pred_tokens], dim=1)
+
+            for blk in self.predictor_blocks:
+                x = blk(x)
+            x = self.predictor_norm(x)
+            x = x[:, N_ctxt:]
+            x = self.predictor_proj(x)
+
+            if self.feat_normed:
+                x = torch.nn.functional.normalize(x, dim=-1)
+
+            return x
 
         if self.if_pe:
             if self.if_rope: #TODO

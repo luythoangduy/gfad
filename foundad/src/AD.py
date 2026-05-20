@@ -31,6 +31,7 @@ def _build_model(meta: Dict[str, Any]) -> VisionModule:
         if_pe=meta.get("if_pred_pe", True),
         feat_normed=meta.get("feat_normed", False),
         gated_attention=meta.get("gated_attention"),
+        backbone_gating=meta.get("backbone_gating"),
         weights=meta.get("weights"),
     )
 
@@ -41,9 +42,14 @@ def _evaluate_single_ckpt(ckpt: Path, cfg: Dict[str, Any]) -> None:
 
     model = _build_model(cfg["meta"])
     state = torch.load(ckpt, map_location="cpu")
-    model.predictor.load_state_dict(state["predictor"])
+    if state.get("backbone_gate") is not None and model.backbone_gate is not None:
+        model.backbone_gate.load_state_dict(state["backbone_gate"])
+    if "predictor" in state:
+        model.predictor.load_state_dict(state["predictor"], strict=False)
     if model.projector is not None:
-        model.projector.load_state_dict(state["projector"])
+        projector_state = state.get("projector")
+        if projector_state is not None:
+            model.projector.load_state_dict(projector_state)
     model.to(device)
     model.eval()
 
@@ -101,9 +107,9 @@ def _evaluate_single_ckpt(ckpt: Path, cfg: Dict[str, Any]) -> None:
             paths = batch["image_path"]; labels.extend(batch["is_anomaly"]); name_buf.extend(batch["image_name"])
 
             enc = model.target_features(img, paths, n_layer=n_layer)
-            pred = model.predict(enc)
+            gated = model.gated_features(img, paths, n_layer=n_layer)
 
-            l = F.mse_loss(enc, pred, reduction="none").mean(dim=2)
+            l = F.mse_loss(enc, gated, reduction="none").mean(dim=2)
 
             topk = torch.topk(l, K, dim=1).values.mean(dim=1)
             patch_scores.extend(topk.cpu())
@@ -151,9 +157,14 @@ def _demo(ckpt: Path, cfg: Dict[str, Any]) -> None:
 
     model = _build_model(cfg["meta"])
     state = torch.load(ckpt, map_location="cpu")
-    model.predictor.load_state_dict(state["predictor"])
+    if state.get("backbone_gate") is not None and model.backbone_gate is not None:
+        model.backbone_gate.load_state_dict(state["backbone_gate"])
+    if "predictor" in state:
+        model.predictor.load_state_dict(state["predictor"], strict=False)
     if model.projector is not None:
-        model.projector.load_state_dict(state["projector"])
+        projector_state = state.get("projector")
+        if projector_state is not None:
+            model.projector.load_state_dict(projector_state)
     model.to(device)
     model.eval()
 
@@ -215,10 +226,10 @@ def _demo(ckpt: Path, cfg: Dict[str, Any]) -> None:
     for i, path in enumerate(img_paths, 1):
         pil_orig, (W0, H0), img = _load_and_preprocess(path)
 
-        enc = model.target_features(img, [str(path)], n_layer=n_layer)  # [1, P, D]
-        pred = model.predict(enc)                                       # [1, P, D]
+        enc = model.target_features(img, [str(path)], n_layer=n_layer)      # [1, P, D]
+        gated = model.gated_features(img, [str(path)], n_layer=n_layer)     # [1, P, D]
 
-        l = F.mse_loss(enc, pred, reduction="none").mean(dim=2)         # [1, P]
+        l = F.mse_loss(enc, gated, reduction="none").mean(dim=2)            # [1, P]
 
         h = w = int(math.sqrt(l.size(1)))
         pix = F.interpolate(l.view(1, 1, h, w), size=img.shape[2:], mode="bilinear", align_corners=False)  # [1,1,H,W]

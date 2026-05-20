@@ -12,9 +12,9 @@ from torch.cuda.amp import autocast, GradScaler
 
 from src.utils.logging import CSVLogger, gpu_timer, grad_logger, AverageMeter
 from src.datasets.dataset import build_dataloader
-from src.utils.synthesis import CutPasteUnion
 from src.foundad import VisionModule
-from src.gated_attention_projector import gate_supervision_loss
+from src.masks import MultiBlockMaskGenerator
+from src.utils.tensors import apply_masks, repeat_interleave_batch
 
 _GLOBAL_SEED = 0
 random.seed(42); np.random.seed(0); torch.manual_seed(0)
@@ -40,19 +40,29 @@ class Trainer:
             if_pe=mcfg.get("if_pred_pe", True),
             feat_normed=mcfg.get("feat_normed", False),
             gated_attention=mcfg.get("gated_attention"),
+            backbone_gating=mcfg.get("backbone_gating"),
             weights=mcfg.get("weights"),
         )
         self.n_layer = args["meta"].get("n_layer", 3)
+        self.model.requires_grad_(False)
         self.model.predictor.requires_grad_(True)
-        if self.model.projector:
-            self.model.projector.requires_grad_(True)
+        if self.model.backbone_gate is not None:
+            self.model.backbone_gate.requires_grad_(True)
         self.loss_mode = args["meta"].get("loss_mode", "l2") # l2 or smooth_l1
         logger.info(f"Loss mode {self.loss_mode}")
-        gate_supervision_cfg = mcfg.get("gated_attention", {}).get("supervision", {})
-        self.gate_supervision_enabled = bool(gate_supervision_cfg.get("enabled", False))
-        self.gate_supervision_weight = float(gate_supervision_cfg.get("loss_weight", 0.1))
-        self.gate_supervision_anomaly_weight = float(gate_supervision_cfg.get("anomaly_weight", 4.0))
-        self.gate_supervision_positions = gate_supervision_cfg.get("positions")
+
+        mask_cfg = mcfg.get("ijepa_mask", {})
+        self.target_layer_norm = bool(mask_cfg.get("target_layer_norm", True))
+        self.mask_generator = MultiBlockMaskGenerator(
+            num_patches=self.model.num_patches,
+            enc_mask_scale=mask_cfg.get("enc_mask_scale", (0.85, 1.0)),
+            pred_mask_scale=mask_cfg.get("pred_mask_scale", (0.15, 0.2)),
+            aspect_ratio=mask_cfg.get("aspect_ratio", (0.75, 1.5)),
+            num_enc_masks=mask_cfg.get("num_enc_masks", 1),
+            num_pred_masks=mask_cfg.get("num_pred_masks", 4),
+            min_keep=mask_cfg.get("min_keep", 10),
+            allow_overlap=mask_cfg.get("allow_overlap", False),
+        )
 
         # ---------- data ----------
         dcfg = args["data"]
@@ -71,7 +81,6 @@ class Trainer:
             use_gray=dcfg.get("use_gray",False),
             use_blur=dcfg.get("use_blur",False),
         )
-        self.cutpaste = CutPasteUnion(colorJitter=0.5)
         self.batch_size = dcfg["batch_size"]
 
         # ---------- optimization ----------
@@ -79,7 +88,7 @@ class Trainer:
 
         ocfg = args["optimization"]
         self.optimizer, self.scheduler, self.scaler = init_opt(
-            predictor=self.model.predictor,
+            predictor=[self.model.predictor, self.model.backbone_gate],
             wd=float(ocfg["weight_decay"]),
             lr=ocfg["lr"],
             lr_config=ocfg.get("lr_config", "const"),
@@ -121,6 +130,7 @@ class Trainer:
     def _save_ckpt(self, ep, step=None):
         name = f"{self.tag}-step{step}.pth.tar" if step else f"{self.tag}-ep{ep}.pth.tar"
         torch.save({"predictor": self.model.predictor.state_dict(),
+                    "backbone_gate": self.model.backbone_gate.state_dict() if self.model.backbone_gate else None,
                     "projector": self.model.projector.state_dict() if self.model.projector else None,
                     "epoch": ep, "lr": self.optimizer.param_groups[0]["lr"]}, self.ckpt_dir/name)
 
@@ -132,34 +142,28 @@ class Trainer:
                 if self.max_steps is not None and gstep >= self.max_steps:
                     logger.info("Reached max_steps=%d. Stopping training.", self.max_steps)
                     return
-                _, imgs_abn, anomaly_masks = self.cutpaste(imgs, labels) # anomaly synthesis on CPU
                 imgs = imgs.to(self.device, non_blocking=True)
-                imgs_abn = imgs_abn.to(self.device, non_blocking=True)
-                anomaly_masks = anomaly_masks.to(self.device, non_blocking=True)
+                masks_enc, masks_pred = self.mask_generator(batch_size=imgs.size(0), device=self.device)
                 def _step():
                     with autocast(dtype=torch.bfloat16, enabled=self.use_bf16):
-                        if np.random.rand() < 0.5:
-                            h = self.model.target_features(imgs, paths, n_layer=self.n_layer); _, p = self.model.context_features(imgs, paths, n_layer=self.n_layer)
-                            gate_labels = torch.zeros_like(anomaly_masks)
-                        else:
-                            h = self.model.target_features(imgs, paths, n_layer=self.n_layer); _, p = self.model.context_features(imgs_abn, paths, n_layer=self.n_layer)
-                            gate_labels = anomaly_masks
-                        loss = self._loss_fn(h, p,)
-                        if self.gate_supervision_enabled:
-                            gate_loss = gate_supervision_loss(
-                                predictor=self.model.predictor,
-                                anomaly_mask=gate_labels,
-                                num_tokens=p.shape[1],
-                                positions=self.gate_supervision_positions,
-                                anomaly_weight=self.gate_supervision_anomaly_weight,
-                            )
-                            if gate_loss is not None:
-                                loss = loss + self.gate_supervision_weight * gate_loss
-                        return loss
+                        h_raw = self.model.target_features(imgs, paths, n_layer=self.n_layer)
+                        h_target = F.layer_norm(h_raw, (h_raw.size(-1),)) if self.target_layer_norm else h_raw
+                        h_target = apply_masks(h_target, masks_pred)
+                        h_target = repeat_interleave_batch(h_target, imgs.size(0), repeat=len(masks_enc))
+
+                        z = self.model.apply_backbone_gate(h_raw.detach())
+                        z = apply_masks(z, masks_enc)
+                        p = self.model.predictor(z, masks_enc, masks_pred)
+                        return self._loss_fn(h_target, p)
                 (loss,), t = gpu_timer(lambda: [_step()])
                 if self.use_bf16: self.scaler.scale(loss).backward(); self.scaler.step(self.optimizer); self.scaler.update()
                 else: loss.backward(); self.optimizer.step()
-                grad_stats = grad_logger(self.model.predictor.named_parameters()); self.optimizer.zero_grad()
+                grad_stats = grad_logger(
+                    list(self.model.predictor.named_parameters())
+                    + [(f"backbone_gate.{n}", p) for n, p in self.model.backbone_gate.named_parameters()]
+                    if self.model.backbone_gate is not None
+                    else self.model.predictor.named_parameters()
+                ); self.optimizer.zero_grad()
                 loss_m.update(loss.item()); time_m.update(t); gstep += 1
                 if gstep % 100 == 0: self._save_ckpt(ep, gstep)
                 self.csv_logger.log(ep+1, itr, loss.item(), t)

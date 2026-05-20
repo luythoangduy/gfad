@@ -9,7 +9,7 @@ import torch.nn.functional as F
 from src.utils.tensors import trunc_normal_
 from src.datasets.dataset import build_dataloader
 import src.dinov2.models.vision_transformer as vit
-from src.gated_attention_projector import apply_gated_attention_to_predictor
+from src.backbone_gate import build_backbone_gate
 from transformers import AutoProcessor, SiglipVisionModel, CLIPVisionModel
 
 
@@ -33,6 +33,7 @@ class VisionModule(nn.Module):
         if_pe: bool = True,
         feat_normed: bool = False,
         gated_attention: Optional[Dict[str, Any]] = None,
+        backbone_gating: Optional[Dict[str, Any]] = None,
         weights: Optional[str] = None,
     ):
         super().__init__()
@@ -43,7 +44,9 @@ class VisionModule(nn.Module):
         self.predictor = vit.__dict__["vit_predictor"](num_patches=self.num_patches, embed_dim=self.embed_dim,
                                                          predictor_embed_dim=pred_emb_dim, depth=pred_depth, if_pe=if_pe, feat_normed=feat_normed)
         self._init_predictor(self.predictor)
-        apply_gated_attention_to_predictor(self.predictor, gated_attention)
+        if gated_attention and gated_attention.get("enabled", False):
+            print("Predictor gated_attention is ignored on this branch; use meta.backbone_gating instead.")
+        self.backbone_gate = build_backbone_gate(self.embed_dim, backbone_gating)
         self.dropout = nn.Dropout(0.2)
         if use_cuda and torch.cuda.is_available():
             self.cuda()
@@ -57,8 +60,18 @@ class VisionModule(nn.Module):
         with torch.no_grad():
             return self._extract(images, paths, n_layer=n_layer)
 
+    def gated_features(self, images, paths, n_layer=3):
+        with torch.no_grad():
+            z = self._extract(images, paths, n_layer=n_layer)
+        return self.apply_backbone_gate(z)
+
+    def apply_backbone_gate(self, z: torch.Tensor) -> torch.Tensor:
+        if self.backbone_gate is None:
+            return z
+        return self.backbone_gate(z)
+
     def context_features(self, images, paths, n_layer=3):
-        z = self._extract(images, paths, n_layer=n_layer)
+        z = self.gated_features(images, paths, n_layer=n_layer)
         p = self.predictor(self.dropout(z))
         return z, p
 
@@ -90,6 +103,9 @@ class VisionModule(nn.Module):
             raise ValueError(f"Unknown model: {model}")
         if model != 'dinosiglip':
             for p in enc.parameters(): 
+                p.requires_grad = False
+        if projector is not None:
+            for p in projector.parameters():
                 p.requires_grad = False
         return enc, num_patches, embed_dim, processor, projector
 
