@@ -1,6 +1,7 @@
 
 from __future__ import annotations
 
+import inspect
 import os, sys, random, logging
 from pathlib import Path
 from typing import Any, Dict, Tuple, Optional, List
@@ -66,6 +67,7 @@ class Trainer:
             use_blur=dcfg.get("use_blur",False),
         )
         self.cutpaste = CutPasteUnion(colorJitter=0.5)
+        print("CutPasteUnion file:", inspect.getfile(CutPasteUnion))
         self.batch_size = dcfg["batch_size"]
 
         # ---------- optimization ----------
