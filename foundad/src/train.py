@@ -126,9 +126,8 @@ class Trainer:
                 if self.max_steps is not None and gstep >= self.max_steps:
                     logger.info("Reached max_steps=%d. Stopping training.", self.max_steps)
                     return
-                _, imgs_abn = self.cutpaste(imgs, labels) # anomaly synthesis on CPU
                 imgs = imgs.to(self.device, non_blocking=True)
-                imgs_abn = imgs_abn.to(self.device, non_blocking=True)
+                _, imgs_abn = self.cutpaste(imgs, labels) # anomaly synthesis
                 def _step():
                     with autocast(dtype=torch.bfloat16, enabled=self.use_bf16):
                         if np.random.rand() < 0.5:
