@@ -135,6 +135,9 @@ class GateUnit(nn.Module):
         raise ValueError(f"Unsupported gated attention mode: {self.mode}")
 
 
+SUPPORTED_MEMORY_TYPES = {"self", "patch_mean"}
+
+
 class GatedSelfAttention(nn.Module):
     def __init__(
         self,
@@ -147,14 +150,21 @@ class GatedSelfAttention(nn.Module):
         gate_specs: Optional[Iterable[GateSpec]] = None,
         activation: str = "sigmoid",
         init_bias: float = 0.0,
+        memory_type: str = "self",
     ) -> None:
         super().__init__()
         if dim % num_heads != 0:
             raise ValueError(f"dim={dim} must be divisible by num_heads={num_heads}")
+        if memory_type not in SUPPORTED_MEMORY_TYPES:
+            raise ValueError(
+                f"Unsupported memory_type '{memory_type}'. "
+                f"Supported: {sorted(SUPPORTED_MEMORY_TYPES)}"
+            )
 
         self.num_heads = num_heads
         self.head_dim = dim // num_heads
         self.scale = self.head_dim**-0.5
+        self.memory_type = memory_type
 
         self.qkv = nn.Linear(dim, dim * 3, bias=qkv_bias)
         self.attn_drop = nn.Dropout(attn_drop)
@@ -185,6 +195,7 @@ class GatedSelfAttention(nn.Module):
             gate_specs=specs,
             activation=str(config.get("activation", "sigmoid")).lower(),
             init_bias=float(config.get("init_bias", 0.0)),
+            memory_type=str(config.get("memory_type", "self")).lower(),
         )
         gated.qkv.load_state_dict(attention.qkv.state_dict())
         gated.proj.load_state_dict(attention.proj.state_dict())
@@ -194,12 +205,25 @@ class GatedSelfAttention(nn.Module):
         gate = self.gates[position] if position in self.gates else None
         return gate(x, memory=memory) if gate is not None else x
 
+    def _build_memory(self, x: Tensor) -> Tensor:
+        """Compute the memory tensor used to condition the gate.
+
+        memory_type='self'       : each patch uses itself as reference (original behaviour).
+        memory_type='patch_mean' : all patches share the image-level mean as reference,
+                                   giving the gate a stable, anomaly-agnostic context signal.
+        """
+        if self.memory_type == "patch_mean":
+            # mean over patch dimension → [B, 1, C] → expand to [B, N, C]
+            return x.mean(dim=1, keepdim=True).expand_as(x)
+        # default: 'self'
+        return x
+
     def forward(self, x: Tensor, attn_bias=None) -> Tensor:
         if attn_bias is not None:
             raise AssertionError("GatedSelfAttention does not support nested tensor attention bias")
 
         B, N, C = x.shape
-        memory = x
+        memory = self._build_memory(x)   # [B, N, C]  — 'self' or 'patch_mean'
         memory_heads = memory.reshape(B, N, self.num_heads, self.head_dim).permute(0, 2, 1, 3)
         x = self._gate("pre_qkv", x, memory=memory)
         qkv = self.qkv(x).reshape(B, N, 3, self.num_heads, self.head_dim).permute(2, 0, 3, 1, 4)

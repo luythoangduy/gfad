@@ -17,6 +17,7 @@ meta:
     granularity: elementwise  # elementwise, headwise, or token
     activation: sigmoid
     init_bias: 0.0
+    memory_type: self  # self (original) | patch_mean (image-level mean as gate reference)
 
 logging:
   folder: logs/${data.data_name}/${app.meta.model}${oc.select:diy_name,""}
