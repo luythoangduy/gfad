@@ -1,0 +1,30 @@
+project:
+  name: anomaly-detection-research
+  exp_name: mvtec_baseline_current_all_classes
+  seed: 0
+
+kaggle:
+  repo_url: https://github.com/luythoangduy/gfad.git
+  repo_branch: exp/screw-capsule-aug-lite
+  dataset_root: /kaggle/input/datasets/ipythonx/mvtec-ad
+  sample_target: /kaggle/working/mvtec_tmp
+  num_samples: 2
+  install_deps: false
+
+run:
+  mode: train
+  app: train_dinov3
+  diy_name: _baseline_current
+  devices:
+    - cuda:0
+  dist_backend: gloo
+  ckpt_step: 2000
+
+data:
+  dataset: mvtec
+  data_name: mvtec_tmp
+  data_path: /kaggle/working
+  test_root: /kaggle/input/datasets/ipythonx/mvtec-ad
+
+output:
+  dir: /kaggle/working/outputs

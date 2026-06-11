@@ -87,3 +87,168 @@ where `data.test_root` is the dataset folder, and `app` is test_dinov2 or test_d
 
 ## Acknowledgement
 This repo utilizes [DINOv3](https://github.com/facebookresearch/dinov3), [DINOv2](https://github.com/facebookresearch/dinov2), [DINO](https://github.com/facebookresearch/dino), [SigLIP](https://github.com/google-research/big_vision), [CLIP](https://github.com/openai/CLIP) and [DINOSigLIP](https://github.com/tri-ml/prismatic-vlms). We also thank [I-JEPA](https://github.com/facebookresearch/ijepa) for the inspiration.
+
+## VSCode -> Kaggle Research Workflow
+
+This repository keeps the Kaggle notebook thin and routes training through scripts and configs in the repo. The existing model logic remains under `foundad/`, while the Kaggle runner lives in `notebooks/kaggle_runner/`.
+
+The notebook template is based on an existing working Kaggle flow: clone or reuse the repo, optionally install only missing dependencies, and run a repo script. Dataset attachments should come from Kaggle notebook metadata, so when the notebook is pushed back to Kaggle the linked datasets travel with that metadata.
+
+### Local setup
+
+Create a local `.env` from `.env.example` and fill in Kaggle credentials for each profile you want to use:
+
+```bash
+cp .env.example .env
+python scripts/select_kaggle_profile.py --profile main
+```
+
+The helper scripts read `.env`, resolve the selected profile, and inject `KAGGLE_USERNAME` and `KAGGLE_KEY` into child processes without printing the API key.
+
+Preferred setup for the current Kaggle CLI is an API token per profile:
+
+```env
+KAGGLE_PROFILE=main
+KAGGLE_MAIN_API_TOKEN=your_main_api_token
+```
+
+Legacy `KAGGLE_<PROFILE>_USERNAME` and `KAGGLE_<PROFILE>_KEY` are still supported as a fallback.
+
+### Pull existing Kaggle notebook and metadata
+
+```bash
+python scripts/pull_kaggle_kernel.py \
+  --profile main \
+  --kernel luythoangduy/research-runner
+```
+
+Or run the Kaggle CLI directly:
+
+```bash
+kaggle kernels pull luythoangduy/research-runner \
+  -p notebooks/kaggle_runner \
+  -m
+```
+
+After pulling, verify `notebooks/kaggle_runner/kernel-metadata.json` and keep the real notebook `id`. The helper normalizes the local code file to `notebook.ipynb` and preserves the existing kernel ID.
+
+If the pulled notebook already contains Kaggle metadata for dataset attachments, keep using that metadata. Do not re-encode dataset links inside notebook cells unless you are intentionally changing the notebook inputs.
+
+Expected metadata shape:
+
+```json
+{
+  "id": "kaggle_username/kernel_slug",
+  "title": "Research Runner",
+  "code_file": "notebook.ipynb",
+  "language": "python",
+  "kernel_type": "notebook",
+  "is_private": true,
+  "enable_gpu": true,
+  "enable_internet": true,
+  "dataset_sources": [
+    "dataset_owner/dataset_slug"
+  ],
+  "competition_sources": [],
+  "kernel_sources": []
+}
+```
+
+Only update the safe fields when needed: `code_file`, `dataset_sources`, `enable_gpu`, `enable_internet`, and `is_private`.
+
+### Push notebook back to Kaggle
+
+```bash
+python scripts/push_kaggle_kernel.py --profile main
+```
+
+Or directly:
+
+```bash
+kaggle kernels push -p notebooks/kaggle_runner
+```
+
+If your main Kaggle account is full, switch profiles:
+
+```bash
+python scripts/push_kaggle_kernel.py --profile alt1
+```
+
+### Run a thin Kaggle experiment
+
+The notebook should only bootstrap the repo, optionally install dependencies if the Kaggle runtime actually needs them, and run an entrypoint such as:
+
+```bash
+python scripts/run_experiment.py --config configs/baseline.yaml
+```
+
+The sample notebook in `notebooks/kaggle_runner/notebook.ipynb` leaves dependency installation behind a toggle so it works for runners where:
+
+- the Kaggle image already has the required packages
+- `pip install -r requirements.txt` is unnecessary
+- package installation is restricted or unreliable
+
+The baseline config includes an experiment ID and writes to:
+
+```text
+/kaggle/working/outputs/<experiment_id>/
+```
+
+The wrapper saves:
+
+```text
+config.yaml
+metrics.json
+git_commit.txt
+log.txt
+```
+
+Optional artifacts can include `summary.csv`, `result_table.csv`, visualizations, and checkpoints. Checkpoints may stay on Kaggle and should not be pulled back unless you explicitly request them.
+
+### Pull only selected results
+
+```bash
+python scripts/pull_kaggle_results.py \
+  --profile main \
+  --kernel luythoangduy/research-runner \
+  --experiment_id exp_001_baseline_seed42
+```
+
+This saves files under `experiments/results/exp_001_baseline_seed42/`.
+
+By default the pull script only downloads:
+
+```text
+metrics.json
+config.yaml
+git_commit.txt
+summary.csv
+result_table.csv
+log.txt
+```
+
+To include additional small files such as `.png` and `.md`, add:
+
+```bash
+python scripts/pull_kaggle_results.py \
+  --profile main \
+  --kernel luythoangduy/research-runner \
+  --experiment_id exp_001_baseline_seed42 \
+  --include-optional-small-files
+```
+
+To pull checkpoints explicitly:
+
+```bash
+python scripts/pull_kaggle_results.py \
+  --profile main \
+  --kernel luythoangduy/research-runner \
+  --experiment_id exp_001_baseline_seed42 \
+  --include-checkpoints
+```
+
+### Notes
+
+- The dataset should stay on Kaggle and be attached through notebook metadata and `kernel-metadata.json`.
+- Do not commit `.env`, `kaggle.json`, datasets, checkpoints, or large outputs.
+- If `kaggle` is not on your PATH, install it with `pip install kaggle` before using the helper scripts.

@@ -121,6 +121,12 @@ def build_train_transform_staged(
     use_blur=False,
     p_orient=0.3,
     p_appear=0.3,
+    color_jitter_strength=0.3,
+    use_affine=False,
+    p_affine=0.0,
+    affine_degrees=7,
+    affine_translate=0.03,
+    affine_scale=(0.95, 1.05),
 ):
     ops = []
 
@@ -131,18 +137,28 @@ def build_train_transform_staged(
         orient_candidates.append(transforms.RandomVerticalFlip(p=1.0))
     if use_rotate90:
         orient_candidates.append(RandomRotate90or270(p=1.0))
+    if use_affine:
+        translate = (affine_translate, affine_translate)
+        orient_candidates.append(
+            transforms.RandomAffine(
+                degrees=affine_degrees,
+                translate=translate,
+                scale=tuple(affine_scale),
+            )
+        )
 
     if orient_candidates:
         ops.append(
             transforms.RandomApply(
                 [transforms.RandomChoice(orient_candidates)],
-                p=p_orient,
+                p=max(p_orient, p_affine),
             )
         )
 
     appear_candidates = []
     if use_color_jitter:
-        appear_candidates.append(transforms.ColorJitter(0.3, 0.3, 0.3, 0.05))
+        strength = color_jitter_strength
+        appear_candidates.append(transforms.ColorJitter(strength, strength, strength, min(0.05, strength)))
     if use_gray:
         appear_candidates.append(transforms.RandomGrayscale(p=1.0))
     if use_blur:
@@ -161,27 +177,54 @@ def build_train_transform_staged(
     return transforms.Compose(ops)
 
 
+def _merge_transform_kwargs(base_kwargs: dict, override_kwargs: dict | None) -> dict:
+    merged = dict(base_kwargs)
+    if override_kwargs:
+        merged.update(override_kwargs)
+    return merged
+
+
 class TrainDataset(torchvision.datasets.ImageFolder):
     def __init__(self, root: str, resize=518, **kwargs):
         super().__init__(os.path.join(root, "train"))
         self.resize = resize
         self.root = os.path.join(root, "train")
-        self.transform = build_train_transform_staged(
-            self.resize,
-            use_hflip=kwargs.get("use_hflip", False),
-            use_vflip=kwargs.get("use_vflip", False),
-            use_rotate90=kwargs.get("use_rotate90", False),
-            use_color_jitter=kwargs.get("use_color_jitter", False),
-            use_gray=kwargs.get("use_gray", False),
-            use_blur=kwargs.get("use_blur", False),
-        )
+        transform_keys = [
+            "use_hflip",
+            "use_vflip",
+            "use_rotate90",
+            "use_color_jitter",
+            "use_gray",
+            "use_blur",
+            "p_orient",
+            "p_appear",
+            "color_jitter_strength",
+            "use_affine",
+            "p_affine",
+            "affine_degrees",
+            "affine_translate",
+            "affine_scale",
+        ]
+        base_transform_kwargs = {
+            key: kwargs[key]
+            for key in transform_keys
+            if key in kwargs
+        }
+        self.transform = build_train_transform_staged(self.resize, **base_transform_kwargs)
+        self.class_transforms = {}
+        for classname, override_kwargs in kwargs.get("augmentation_overrides", {}).items():
+            self.class_transforms[classname] = build_train_transform_staged(
+                self.resize,
+                **_merge_transform_kwargs(base_transform_kwargs, override_kwargs),
+            )
         self.samples = [(path, self.classes[target]) for (path, target) in self.samples]
         print(f"Totally {len(self.samples)} will be trained..")
 
     def __getitem__(self, index):
         path_train, target = self.samples[index]
         image_train = self.loader(path_train).convert("RGB")
-        image_train = self.transform(image_train)
+        transform = self.class_transforms.get(target, self.transform)
+        image_train = transform(image_train)
         return image_train, target, path_train
 
 

@@ -54,6 +54,7 @@ data:
   use_color_jitter: True
   use_gray: True
   use_blur: True
+  augmentation_overrides: {}
 
 optimization:
   weight_decay: 1e-4

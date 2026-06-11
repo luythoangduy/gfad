@@ -1,0 +1,61 @@
+project:
+  name: anomaly-detection-research
+  exp_name: mvtec_aug_lite_screw_capsule_all_classes
+  seed: 0
+
+kaggle:
+  repo_url: https://github.com/luythoangduy/gfad.git
+  repo_branch: exp/screw-capsule-aug-lite
+  dataset_root: /kaggle/input/datasets/ipythonx/mvtec-ad
+  sample_target: /kaggle/working/mvtec_tmp
+  num_samples: 2
+  install_deps: false
+
+run:
+  mode: train
+  app: train_dinov3
+  diy_name: _aug_lite_screw_capsule
+  devices:
+    - cuda:0
+  dist_backend: gloo
+  ckpt_step: 2000
+
+data:
+  dataset: mvtec
+  data_name: mvtec_tmp
+  data_path: /kaggle/working
+  test_root: /kaggle/input/datasets/ipythonx/mvtec-ad
+  augmentation_overrides:
+    capsule:
+      use_rotate90: false
+      use_gray: false
+      use_blur: false
+      use_color_jitter: true
+      color_jitter_strength: 0.1
+      use_affine: true
+      p_affine: 0.25
+      p_orient: 0.25
+      p_appear: 0.15
+      affine_degrees: 7
+      affine_translate: 0.03
+      affine_scale:
+        - 0.95
+        - 1.05
+    screw:
+      use_rotate90: false
+      use_gray: false
+      use_blur: false
+      use_color_jitter: true
+      color_jitter_strength: 0.1
+      use_affine: true
+      p_affine: 0.25
+      p_orient: 0.25
+      p_appear: 0.15
+      affine_degrees: 7
+      affine_translate: 0.03
+      affine_scale:
+        - 0.95
+        - 1.05
+
+output:
+  dir: /kaggle/working/outputs

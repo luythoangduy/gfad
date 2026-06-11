@@ -1,0 +1,22 @@
+{
+  "id": "hongkhngdu/gfad-baseline",
+  "title": "GFAD Baseline",
+  "code_file": "notebook.ipynb",
+  "language": "python",
+  "kernel_type": "notebook",
+  "is_private": false,
+  "enable_gpu": true,
+  "enable_tpu": false,
+  "enable_internet": true,
+  "keywords": [
+    "gpu",
+    "mvtec",
+    "baseline"
+  ],
+  "dataset_sources": [
+    "ipythonx/mvtec-ad"
+  ],
+  "kernel_sources": [],
+  "competition_sources": [],
+  "model_sources": []
+}

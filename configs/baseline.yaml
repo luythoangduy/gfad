@@ -1,0 +1,20 @@
+project:
+  name: anomaly-detection-research
+  exp_name: exp_001_baseline_seed42
+  seed: 42
+
+run:
+  mode: train
+  app: train_dinov3
+  diy_name: _baseline_seed42
+  devices:
+    - cuda:0
+
+data:
+  dataset: mvtec
+  data_name: mvtec_1shot
+  data_path: /kaggle/input/dataset_slug
+  test_root: /kaggle/input/dataset_slug
+
+output:
+  dir: /kaggle/working/outputs

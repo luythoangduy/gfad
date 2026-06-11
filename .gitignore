@@ -1,32 +1,50 @@
-.idea/
-__pycache__/
-LabletAnomaly.egg-info/
-logs/*
+.env
+kaggle.json
 
-# =============================
-# Python
-# =============================
 __pycache__/
-*.py[cod]
-*.so
-*.pyd
+*.pyc
 *.pyo
+*.pyd
+*.so
 
-# Virtual env / venv
 .venv/
 venv/
 env/
 ENV/
-*.egg-info/
-.eggs/
+.cache/
+.mypy_cache/
+.pytest_cache/
+pytest_cache/
 
-# Jupyter
 .ipynb_checkpoints/
 *.ipynb_checkpoints
 
-# =============================
-# Logs / Cache / Temp
-# =============================
+.vscode/
+.idea/
+*.iml
+
+build/
+dist/
+*.egg
+*.egg-info/
+.eggs/
+pip-wheel-metadata/
+wheels/
+*.whl
+
+outputs/
+checkpoints/
+logs/
+wandb/
+lightning_logs/
+mlruns/
+runs/
+tensorboard/
+
+*.pth
+*.pt
+*.ckpt
+
 *.log
 *.out
 *.err
@@ -34,93 +52,13 @@ ENV/
 *.swp
 *.swo
 *~
+
 .DS_Store
-Thumbs.db
-
-# Python cache
-.cache/
-pytest_cache/
-.pytest_cache/
-.mypy_cache/
-.dmypy.json
-dmypy.json
-
-# Torch / ML
-*.pt
-*.pth
-*.ckpt
-*.onnx
-lightning_logs/
-wandb/
-mlruns/
-runs/
-tensorboard/
-**/checkpoints/
-
-# =============================
-# OS / Editor
-# =============================
-# macOS
-.DS_Store
-.AppleDouble
-.LSOverride
-
-# Windows
 Thumbs.db
 ehthumbs.db
 Desktop.ini
 
-# VSCode / JetBrains
-.vscode/
-.idea/
-*.iml
-
-# =============================
-# Build / Distribution
-# =============================
-build/
-dist/
-*.egg
-*.egg-info
-.eggs/
-pip-wheel-metadata/
-wheels/
-*.whl
-tox.ini
-pyproject.toml
-setup.cfg
-
-
-# =============================
-# Data / Results
-# =============================
-*.csv
-*.tsv
-*.xlsx
-*.xls
-*.jsonl
-*.npz
-*.npy
-*.h5
-*.pkl
-*.pickle
-*.mat
-*.tar
-*.tar.gz
-*.zip
-*.rar
-
-# Large data dirs
-data/
-results/
-outputs/
-logs/
-
-
-# =============================
-# Hidden files (dotfiles)
-# =============================
-.*
-!.gitignore
-!.gitattributes
-!.gitmodules
+experiments/results/**/checkpoint*
+experiments/results/**/*.pth
+experiments/results/**/*.pt
+experiments/results/**/*.ckpt

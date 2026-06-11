@@ -65,6 +65,10 @@ class Trainer:
             use_color_jitter=dcfg.get("use_color_jitter",False),
             use_gray=dcfg.get("use_gray",False),
             use_blur=dcfg.get("use_blur",False),
+            p_orient=dcfg.get("p_orient", 0.3),
+            p_appear=dcfg.get("p_appear", 0.3),
+            color_jitter_strength=dcfg.get("color_jitter_strength", 0.3),
+            augmentation_overrides=dcfg.get("augmentation_overrides", {}),
         )
         self.cutpaste = CutPasteUnion(colorJitter=0.5)
         print("CutPasteUnion file:", inspect.getfile(CutPasteUnion))
