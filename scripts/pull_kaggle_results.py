@@ -102,6 +102,8 @@ def main() -> None:
     try:
         kaggle_bin = ensure_kaggle_cli()
         env, username, auth_mode = build_kaggle_env(args.profile)
+        env.setdefault("PYTHONIOENCODING", "utf-8")
+        env.setdefault("PYTHONUTF8", "1")
         print_profile_selection(args.profile, username, auth_mode)
         with tempfile.TemporaryDirectory(prefix="kaggle-results-") as temp_dir:
             temp_path = Path(temp_dir)

@@ -28,3 +28,10 @@ data:
 
 output:
   dir: /kaggle/working/outputs
+
+wandb:
+  project: gfad-mvtec
+  group: screw-capsule-aug-lite
+  tags:
+    - baseline
+    - mvtec

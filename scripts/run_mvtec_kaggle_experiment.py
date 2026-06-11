@@ -3,9 +3,11 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import os
 import shutil
 import subprocess
 import sys
+import traceback
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -52,7 +54,7 @@ def copy_if_exists(src: Path, dst: Path) -> None:
         shutil.copy2(src, dst)
 
 
-def write_metrics_summary(eval_csv: Path, output_path: Path, config: dict, status: str) -> None:
+def write_metrics_summary(eval_csv: Path, output_path: Path, config: dict, status: str, error: str | None = None) -> dict:
     rows = []
     if eval_csv.exists():
         with eval_csv.open("r", encoding="utf-8", newline="") as handle:
@@ -67,9 +69,66 @@ def write_metrics_summary(eval_csv: Path, output_path: Path, config: dict, statu
         "mean": mean_row,
         "screw": focus_rows.get("screw", {}),
         "capsule": focus_rows.get("capsule", {}),
+        "error": error,
         "finished_at": datetime.now(timezone.utc).isoformat(),
     }
     output_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+    return payload
+
+
+def init_wandb(config: dict, output_dir: Path):
+    try:
+        import wandb
+    except ImportError as exc:
+        (output_dir / "wandb_init_error.txt").write_text(f"wandb import failed: {exc}\n", encoding="utf-8")
+        return None
+
+    if os.getenv("WANDB_MODE", "").lower() == "disabled":
+        return None
+
+    exp_name = config["project"]["exp_name"]
+    wandb_cfg = config.get("wandb", {})
+    try:
+        return wandb.init(
+            project=os.getenv("WANDB_PROJECT", wandb_cfg.get("project", "gfad-mvtec")),
+            entity=os.getenv("WANDB_ENTITY", wandb_cfg.get("entity")),
+            name=os.getenv("WANDB_NAME", exp_name),
+            group=os.getenv("WANDB_GROUP", wandb_cfg.get("group", "screw-capsule-aug-lite")),
+            tags=wandb_cfg.get("tags", []),
+            config=config,
+            save_code=False,
+        )
+    except Exception as exc:
+        (output_dir / "wandb_init_error.txt").write_text(f"wandb init failed: {exc}\n", encoding="utf-8")
+        return None
+
+
+def _float_or_none(value):
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def log_wandb_summary(wandb_run, metrics: dict, output_dir: Path) -> None:
+    if wandb_run is None:
+        return
+
+    payload = {
+        "status_completed": 1 if metrics.get("status") == "completed" else 0,
+    }
+    for section in ("mean", "screw", "capsule"):
+        row = metrics.get(section) or {}
+        for key in ("inst_auroc", "inst_aupr", "pix_auroc", "pro_auc"):
+            value = _float_or_none(row.get(key))
+            if value is not None:
+                payload[f"{section}/{key}"] = value
+    wandb_run.log(payload)
+
+    for file_name in ("metrics.json", "config.yaml", "git_commit.txt", "log.txt", "params.yaml", "train.csv", "AD_eval.csv"):
+        path = output_dir / file_name
+        if path.exists():
+            wandb_run.save(str(path), base_path=str(output_dir))
 
 
 def hydra_value(value) -> str:
@@ -87,7 +146,7 @@ def flatten_hydra_overrides(prefix: str, payload: dict) -> list[str]:
         if isinstance(value, dict):
             overrides.extend(flatten_hydra_overrides(path, value))
         else:
-            overrides.append(f"{path}={hydra_value(value)}")
+            overrides.append(f"+{path}={hydra_value(value)}")
     return overrides
 
 
@@ -103,75 +162,97 @@ def main() -> None:
     output_root = Path(config.get("output", {}).get("dir", "/kaggle/working/outputs"))
     output_dir = output_root / exp_name
     output_dir.mkdir(parents=True, exist_ok=True)
+    wandb_run = init_wandb(config, output_dir)
+    run_error = None
+    exit_code = 0
 
     log_path = output_dir / "log.txt"
-    with log_path.open("w", encoding="utf-8") as log_handle:
-        log_handle.write(f"Started: {datetime.now(timezone.utc).isoformat()}\n")
+    try:
+        with log_path.open("w", encoding="utf-8") as log_handle:
+            log_handle.write(f"Started: {datetime.now(timezone.utc).isoformat()}\n")
 
-        if kaggle_cfg.get("install_deps", False):
-            run([sys.executable, "-m", "pip", "install", "hydra-core", "torchmetrics"], cwd=REPO_ROOT, log_handle=log_handle)
+            if kaggle_cfg.get("install_deps", False):
+                run([sys.executable, "-m", "pip", "install", "hydra-core", "torchmetrics", "wandb"], cwd=REPO_ROOT, log_handle=log_handle)
 
-        sample_target = Path(kaggle_cfg["sample_target"])
-        if not sample_target.exists():
-            run(
-                [
-                    sys.executable,
-                    "foundad/src/sample.py",
-                    f"source={kaggle_cfg['dataset_root']}",
-                    f"target={sample_target}",
-                    f"seed={config['project'].get('seed', 0)}",
-                    f"num_samples={kaggle_cfg.get('num_samples', 2)}",
-                ],
-                cwd=REPO_ROOT,
-                log_handle=log_handle,
-            )
+            sample_target = Path(kaggle_cfg["sample_target"])
+            if not sample_target.exists():
+                run(
+                    [
+                        sys.executable,
+                        "foundad/src/sample.py",
+                        f"source={kaggle_cfg['dataset_root']}",
+                        f"target={sample_target}",
+                        f"seed={config['project'].get('seed', 0)}",
+                        f"num_samples={kaggle_cfg.get('num_samples', 2)}",
+                    ],
+                    cwd=REPO_ROOT,
+                    log_handle=log_handle,
+                )
 
-        devices = "[" + ",".join(run_cfg.get("devices", ["cuda:0"])) + "]"
-        data_overrides = data_cfg.get("augmentation_overrides", {})
-        override_path = output_dir / "augmentation_overrides.yaml"
-        override_path.write_text(yaml.safe_dump(data_overrides, sort_keys=False), encoding="utf-8")
+            devices = "[" + ",".join(run_cfg.get("devices", ["cuda:0"])) + "]"
+            data_overrides = data_cfg.get("augmentation_overrides", {})
+            override_path = output_dir / "augmentation_overrides.yaml"
+            override_path.write_text(yaml.safe_dump(data_overrides, sort_keys=False), encoding="utf-8")
 
-        common_overrides = [
-            f"data.dataset={data_cfg.get('dataset', 'mvtec')}",
-            f"data.data_name={data_cfg.get('data_name', 'mvtec_tmp')}",
-            f"data.data_path={data_cfg.get('data_path', '/kaggle/working')}",
-            f"data.test_root={data_cfg.get('test_root', kaggle_cfg['dataset_root'])}",
-            "data.num_workers=4",
-            f"diy_name={run_cfg['diy_name']}",
-            f"devices={devices}",
-            f"dist.backend={run_cfg.get('dist_backend', 'gloo')}",
-            "testing.segmentation_vis=False",
-        ]
+            common_overrides = [
+                f"data.dataset={data_cfg.get('dataset', 'mvtec')}",
+                f"data.data_name={data_cfg.get('data_name', 'mvtec_tmp')}",
+                f"data.data_path={data_cfg.get('data_path', '/kaggle/working')}",
+                f"data.test_root={data_cfg.get('test_root', kaggle_cfg['dataset_root'])}",
+                "data.num_workers=4",
+                f"diy_name={run_cfg['diy_name']}",
+                f"devices={devices}",
+                f"dist.backend={run_cfg.get('dist_backend', 'gloo')}",
+                "testing.segmentation_vis=False",
+            ]
 
-        train_cmd = [
-            sys.executable,
-            "foundad/main.py",
-            "mode=train",
-            f"app={run_cfg.get('app', 'train_dinov3')}",
-            *common_overrides,
-        ]
-        if data_overrides:
-            train_cmd.extend(flatten_hydra_overrides("data.augmentation_overrides", data_overrides))
-        run(train_cmd, cwd=REPO_ROOT, log_handle=log_handle)
+            train_cmd = [
+                sys.executable,
+                "foundad/main.py",
+                "mode=train",
+                f"app={run_cfg.get('app', 'train_dinov3')}",
+                *common_overrides,
+            ]
+            if data_overrides:
+                train_cmd.extend(flatten_hydra_overrides("data.augmentation_overrides", data_overrides))
+            run(train_cmd, cwd=REPO_ROOT, log_handle=log_handle)
 
-        eval_cmd = [
-            sys.executable,
-            "foundad/main.py",
-            "mode=AD",
-            "app=test",
-            f"app.ckpt_step={run_cfg.get('ckpt_step', 2000)}",
-            *common_overrides,
-        ]
-        run(eval_cmd, cwd=REPO_ROOT, log_handle=log_handle)
+            eval_cmd = [
+                sys.executable,
+                "foundad/main.py",
+                "mode=AD",
+                "app=test",
+                f"app.ckpt_step={run_cfg.get('ckpt_step', 2000)}",
+                *common_overrides,
+            ]
+            run(eval_cmd, cwd=REPO_ROOT, log_handle=log_handle)
+    except subprocess.CalledProcessError as exc:
+        exit_code = exc.returncode
+        run_error = f"Command failed with exit code {exc.returncode}: {' '.join(exc.cmd)}"
+    except Exception:
+        exit_code = 1
+        run_error = traceback.format_exc()
+    finally:
+        log_dir = REPO_ROOT / "logs" / data_cfg.get("data_name", "mvtec_tmp") / f"dinov3{run_cfg['diy_name']}"
+        eval_dir = log_dir / "eval" / str(run_cfg.get("ckpt_step", 2000))
+        copy_if_exists(log_dir / "params.yaml", output_dir / "params.yaml")
+        copy_if_exists(log_dir / "train.csv", output_dir / "train.csv")
+        copy_if_exists(eval_dir / "AD_eval.csv", output_dir / "AD_eval.csv")
+        shutil.copy2(config_path, output_dir / "config.yaml")
+        (output_dir / "git_commit.txt").write_text(git_commit() + "\n", encoding="utf-8")
+        if run_error:
+            with log_path.open("a", encoding="utf-8") as log_handle:
+                log_handle.write("\nRun failed:\n")
+                log_handle.write(run_error)
+                log_handle.write("\n")
+        status = "completed" if run_error is None else "failed"
+        metrics = write_metrics_summary(output_dir / "AD_eval.csv", output_dir / "metrics.json", config, status, run_error)
+        log_wandb_summary(wandb_run, metrics, output_dir)
+        if wandb_run is not None:
+            wandb_run.finish(exit_code=exit_code)
 
-    log_dir = REPO_ROOT / "logs" / data_cfg.get("data_name", "mvtec_tmp") / f"dinov3{run_cfg['diy_name']}"
-    eval_dir = log_dir / "eval" / str(run_cfg.get("ckpt_step", 2000))
-    copy_if_exists(log_dir / "params.yaml", output_dir / "params.yaml")
-    copy_if_exists(log_dir / "train.csv", output_dir / "train.csv")
-    copy_if_exists(eval_dir / "AD_eval.csv", output_dir / "AD_eval.csv")
-    shutil.copy2(config_path, output_dir / "config.yaml")
-    (output_dir / "git_commit.txt").write_text(git_commit() + "\n", encoding="utf-8")
-    write_metrics_summary(output_dir / "AD_eval.csv", output_dir / "metrics.json", config, "completed")
+    if run_error:
+        raise SystemExit(exit_code)
 
 
 if __name__ == "__main__":
