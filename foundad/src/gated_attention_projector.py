@@ -8,7 +8,7 @@ import torch
 from torch import Tensor, nn
 
 
-SUPPORTED_GATE_MODES = {"multiplication", "residual"}
+SUPPORTED_GATE_MODES = {"multiplication", "residual", "memory"}
 SUPPORTED_GATE_POSITIONS = ("pre_qkv", "q", "k", "v", "attn_output", "proj_output")
 POSITION_ALIASES = {
     "input": "pre_qkv",
@@ -22,6 +22,7 @@ POSITION_ALIASES = {
     "post_proj": "proj_output",
     "output": "proj_output",
 }
+SUPPORTED_MEMORY_TYPES = {"self", "patch_mean"}
 
 
 @dataclass(frozen=True)
@@ -96,9 +97,18 @@ class GateUnit(nn.Module):
         self.granularity = granularity
         self.activation = activation
         out_dim = dim if granularity == "elementwise" else 1
-        self.proj = nn.Linear(dim, out_dim)
-        nn.init.zeros_(self.proj.weight)
-        nn.init.constant_(self.proj.bias, init_bias)
+        if mode == "memory":
+            self.keep_proj = nn.Linear(dim, out_dim)
+            self.write_proj = nn.Linear(dim, out_dim)
+            self.candidate_proj = nn.Linear(dim, dim)
+            nn.init.zeros_(self.keep_proj.weight)
+            nn.init.constant_(self.keep_proj.bias, init_bias)
+            nn.init.zeros_(self.write_proj.weight)
+            nn.init.constant_(self.write_proj.bias, init_bias)
+        else:
+            self.proj = nn.Linear(dim, out_dim)
+            nn.init.zeros_(self.proj.weight)
+            nn.init.constant_(self.proj.bias, init_bias)
 
     def _activate(self, gate: Tensor) -> Tensor:
         if self.activation == "sigmoid":
@@ -111,7 +121,14 @@ class GateUnit(nn.Module):
             return gate
         raise ValueError(f"Unsupported gated_attention.activation: {self.activation}")
 
-    def forward(self, x: Tensor) -> Tensor:
+    def forward(self, x: Tensor, memory: Optional[Tensor] = None) -> Tensor:
+        if self.mode == "memory":
+            memory = x if memory is None else memory
+            keep = torch.sigmoid(self.keep_proj(memory))
+            write = torch.sigmoid(self.write_proj(memory))
+            candidate = torch.tanh(self.candidate_proj(x))
+            return keep * memory + write * candidate
+
         gate = self._activate(self.proj(x))
         if self.mode == "multiplication":
             return x * gate
@@ -121,15 +138,12 @@ class GateUnit(nn.Module):
 
 
 def rotate_half(x: Tensor) -> Tensor:
-    """LLaMA/Qwen-style rotate: [..., D] -> [..., D]. Requires even D."""
     x1 = x[..., : x.shape[-1] // 2]
     x2 = x[..., x.shape[-1] // 2 :]
     return torch.cat((-x2, x1), dim=-1)
 
 
 class RotaryEmbedding(nn.Module):
-    """Simple RoPE for tensors shaped [batch, heads, seq_len, head_dim]."""
-
     def __init__(
         self,
         dim: int,
@@ -143,39 +157,29 @@ class RotaryEmbedding(nn.Module):
         self.dim = dim
         self.base = float(base)
         self.max_position_embeddings = int(max_position_embeddings)
-
-        inv_freq = 1.0 / (
-            self.base ** (torch.arange(0, dim, 2, dtype=torch.float32) / dim)
-        )
+        inv_freq = 1.0 / (self.base ** (torch.arange(0, dim, 2, dtype=torch.float32) / dim))
         self.register_buffer("inv_freq", inv_freq, persistent=False)
 
     @torch.no_grad()
     def forward(self, x: Tensor, position_ids: Optional[Tensor] = None) -> tuple[Tensor, Tensor]:
-        """
-        Args:
-            x: Tensor with shape [B, H, N, D]. Only device/dtype/B/N are used.
-            position_ids: Optional tensor with shape [B, N] or [N]. If omitted, uses 0..N-1.
-        Returns:
-            cos, sin with shape [B, 1, N, D], broadcastable to q/k.
-        """
         if x.dim() != 4:
             raise ValueError(f"RoPE expects x with shape [B, H, N, D], got {tuple(x.shape)}")
 
-        B, _, N, _ = x.shape
+        batch_size, _, seq_len, _ = x.shape
         device = x.device
 
         if position_ids is None:
-            position_ids = torch.arange(N, device=device, dtype=torch.long).unsqueeze(0).expand(B, -1)
+            position_ids = torch.arange(seq_len, device=device, dtype=torch.long).unsqueeze(0).expand(batch_size, -1)
         else:
             position_ids = position_ids.to(device=device)
             if position_ids.dim() == 1:
-                position_ids = position_ids.unsqueeze(0).expand(B, -1)
-            if position_ids.shape != (B, N):
+                position_ids = position_ids.unsqueeze(0).expand(batch_size, -1)
+            if position_ids.shape != (batch_size, seq_len):
                 raise ValueError(
-                    f"position_ids must have shape [N] or [B, N], got {tuple(position_ids.shape)} for B={B}, N={N}"
+                    "position_ids must have shape [N] or [B, N], "
+                    f"got {tuple(position_ids.shape)} for B={batch_size}, N={seq_len}"
                 )
 
-        # Compute freqs in fp32 for numerical stability, then cast back to x dtype.
         inv_freq = self.inv_freq.to(device=device, dtype=torch.float32)
         freqs = torch.einsum("bn,d->bnd", position_ids.float(), inv_freq)
         emb = torch.cat((freqs, freqs), dim=-1)
@@ -205,21 +209,27 @@ class GatedSelfAttention(nn.Module):
         use_rope: bool = True,
         rope_base: float = 10000.0,
         max_position_embeddings: int = 2048,
+        memory_type: str = "self",
     ) -> None:
         super().__init__()
         if dim % num_heads != 0:
             raise ValueError(f"dim={dim} must be divisible by num_heads={num_heads}")
+        if memory_type not in SUPPORTED_MEMORY_TYPES:
+            raise ValueError(
+                f"Unsupported memory_type '{memory_type}'. "
+                f"Supported: {sorted(SUPPORTED_MEMORY_TYPES)}"
+            )
 
         self.num_heads = num_heads
         self.head_dim = dim // num_heads
         self.inv_sqrt_head_dim = 1.0 / math.sqrt(self.head_dim)
         self.use_rope = use_rope
+        self.memory_type = memory_type
 
         self.qkv = nn.Linear(dim, dim * 3, bias=qkv_bias)
         self.attn_drop = nn.Dropout(attn_drop)
         self.proj = nn.Linear(dim, dim, bias=proj_bias)
         self.proj_drop = nn.Dropout(proj_drop)
-
         self.rotary_emb = (
             RotaryEmbedding(
                 dim=self.head_dim,
@@ -259,14 +269,20 @@ class GatedSelfAttention(nn.Module):
             max_position_embeddings=int(
                 config.get("max_position_embeddings", config.get("rope_max_position_embeddings", 2048))
             ),
+            memory_type=str(config.get("memory_type", "self")).lower(),
         )
         gated.qkv.load_state_dict(attention.qkv.state_dict())
         gated.proj.load_state_dict(attention.proj.state_dict())
         return gated
 
-    def _gate(self, position: str, x: Tensor) -> Tensor:
+    def _gate(self, position: str, x: Tensor, memory: Optional[Tensor] = None) -> Tensor:
         gate = self.gates[position] if position in self.gates else None
-        return gate(x) if gate is not None else x
+        return gate(x, memory=memory) if gate is not None else x
+
+    def _build_memory(self, x: Tensor) -> Tensor:
+        if self.memory_type == "patch_mean":
+            return x.mean(dim=1, keepdim=True).expand_as(x)
+        return x
 
     def forward(
         self,
@@ -277,28 +293,29 @@ class GatedSelfAttention(nn.Module):
         if attn_bias is not None:
             raise AssertionError("GatedSelfAttention does not support nested tensor attention bias")
 
-        B, N, C = x.shape
-        x = self._gate("pre_qkv", x)
+        batch_size, seq_len, channels = x.shape
+        memory = self._build_memory(x)
+        memory_heads = memory.reshape(batch_size, seq_len, self.num_heads, self.head_dim).permute(0, 2, 1, 3)
+        x = self._gate("pre_qkv", x, memory=memory)
+        qkv = self.qkv(x).reshape(batch_size, seq_len, 3, self.num_heads, self.head_dim).permute(2, 0, 3, 1, 4)
 
-        qkv = self.qkv(x).reshape(B, N, 3, self.num_heads, self.head_dim).permute(2, 0, 3, 1, 4)
-        q = self._gate("q", qkv[0])
-        k = self._gate("k", qkv[1])
-        v = self._gate("v", qkv[2])
+        q = self._gate("q", qkv[0], memory=memory_heads)
+        k = self._gate("k", qkv[1], memory=memory_heads)
+        v = self._gate("v", qkv[2], memory=memory_heads)
 
         if self.rotary_emb is not None:
             cos, sin = self.rotary_emb(q, position_ids=position_ids)
             q, k = apply_rotary_pos_emb(q, k, cos, sin)
 
-        # Scale exactly once. The previous version scaled q and the attention score.
         attn = q @ k.transpose(-2, -1) * self.inv_sqrt_head_dim
         attn = attn.softmax(dim=-1)
         attn = self.attn_drop(attn)
 
         x = attn @ v
-        x = self._gate("attn_output", x)
-        x = x.transpose(1, 2).reshape(B, N, C)
+        x = self._gate("attn_output", x, memory=memory_heads)
+        x = x.transpose(1, 2).reshape(batch_size, seq_len, channels)
         x = self.proj(x)
-        x = self._gate("proj_output", x)
+        x = self._gate("proj_output", x, memory=memory)
         x = self.proj_drop(x)
         return x
 
