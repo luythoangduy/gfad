@@ -66,7 +66,7 @@ class Trainer:
             use_gray=dcfg.get("use_gray",False),
             use_blur=dcfg.get("use_blur",False),
         )
-        self.cutpaste = CutPasteUnion(colorJitter=0.5)
+        self.cutpaste = CutPasteUnion(colorJitter=0.5, use_gpu_mask=dcfg.get("use_gpu_mask", True))
         print("CutPasteUnion file:", inspect.getfile(CutPasteUnion))
         self.batch_size = dcfg["batch_size"]
 

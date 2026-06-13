@@ -54,6 +54,7 @@ data:
   use_color_jitter: True
   use_gray: True
   use_blur: True
+  use_gpu_mask: True
 
 optimization:
   weight_decay: 1e-4
