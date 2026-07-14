@@ -32,6 +32,8 @@ def _build_model(meta: Dict[str, Any]) -> VisionModule:
         feat_normed=meta.get("feat_normed", False),
         gated_attention=meta.get("gated_attention"),
         weights=meta.get("weights"),
+        predictor_type=meta.get("predictor_type", "gated_self_attention"),
+        neighbor_masked_attention=meta.get("neighbor_masked_attention"),
     )
 
 @torch.inference_mode()

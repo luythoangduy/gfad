@@ -41,6 +41,8 @@ class Trainer:
             feat_normed=mcfg.get("feat_normed", False),
             gated_attention=mcfg.get("gated_attention"),
             weights=mcfg.get("weights"),
+            predictor_type=mcfg.get("predictor_type", "gated_self_attention"),
+            neighbor_masked_attention=mcfg.get("neighbor_masked_attention"),
         )
         self.n_layer = args["meta"].get("n_layer", 3)
         self.model.predictor.requires_grad_(True)

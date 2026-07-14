@@ -10,7 +10,10 @@ from src.utils.tensors import trunc_normal_
 from src.datasets.dataset import build_dataloader
 import src.dinov2.models.vision_transformer as vit
 from src.gated_attention_projector import apply_gated_attention_to_predictor
+from src.neighbor_masked_predictor import NeighborMaskedCrossAttentionPredictor
 from transformers import AutoProcessor, SiglipVisionModel, CLIPVisionModel
+
+SUPPORTED_PREDICTOR_TYPES = {"gated_self_attention", "neighbor_masked_cross_attention"}
 
 
 
@@ -34,16 +37,43 @@ class VisionModule(nn.Module):
         feat_normed: bool = False,
         gated_attention: Optional[Dict[str, Any]] = None,
         weights: Optional[str] = None,
+        predictor_type: str = "gated_self_attention",
+        neighbor_masked_attention: Optional[Dict[str, Any]] = None,
     ):
         super().__init__()
         self.weights = weights
         (self.encoder, self.num_patches, self.embed_dim, self.processor, self.projector) = self._build_encoder(model_name)
         self.model_name = model_name
 
-        self.predictor = vit.__dict__["vit_predictor"](num_patches=self.num_patches, embed_dim=self.embed_dim,
-                                                         predictor_embed_dim=pred_emb_dim, depth=pred_depth, if_pe=if_pe, feat_normed=feat_normed)
-        self._init_predictor(self.predictor)
-        apply_gated_attention_to_predictor(self.predictor, gated_attention)
+        if predictor_type not in SUPPORTED_PREDICTOR_TYPES:
+            raise ValueError(
+                f"Unknown predictor_type '{predictor_type}'. Supported: {sorted(SUPPORTED_PREDICTOR_TYPES)}"
+            )
+        self.predictor_type = predictor_type
+
+        if predictor_type == "neighbor_masked_cross_attention":
+            nm_cfg = dict(neighbor_masked_attention or {})
+            self.predictor = NeighborMaskedCrossAttentionPredictor(
+                num_patches=self.num_patches,
+                embed_dim=self.embed_dim,
+                predictor_embed_dim=pred_emb_dim,
+                depth=pred_depth,
+                num_heads=nm_cfg.get("num_heads", 12),
+                mlp_ratio=nm_cfg.get("mlp_ratio", 4.0),
+                mask_radius=nm_cfg.get("mask_radius", 1),
+                attn_drop=nm_cfg.get("attn_drop", 0.0),
+                proj_drop=nm_cfg.get("proj_drop", 0.0),
+                use_query_pos=nm_cfg.get("use_query_pos", True),
+                feat_normed=feat_normed,
+            )
+            self._init_predictor(self.predictor)
+            # gated_attention_projector and RoPE are only defined for the
+            # legacy self-attention predictor and must not be applied here.
+        else:
+            self.predictor = vit.__dict__["vit_predictor"](num_patches=self.num_patches, embed_dim=self.embed_dim,
+                                                             predictor_embed_dim=pred_emb_dim, depth=pred_depth, if_pe=if_pe, feat_normed=feat_normed)
+            self._init_predictor(self.predictor)
+            apply_gated_attention_to_predictor(self.predictor, gated_attention)
         self.dropout = nn.Dropout(0.2)
         if use_cuda and torch.cuda.is_available():
             self.cuda()

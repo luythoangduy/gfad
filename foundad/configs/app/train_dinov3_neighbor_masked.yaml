@@ -1,4 +1,9 @@
 # @package app
+# Same as train_dinov3.yaml but selects the NeighborMaskedCrossAttentionPredictor,
+# which prevents identity-shortcut leakage by masking out patch i and its
+# mask_radius neighborhood from the context a predictor can attend to when
+# reconstructing patch i. Everything else (encoder, loss, optimizer, Top-K,
+# evaluation, post-processing) is unchanged.
 meta:
   model: 'dinov3'
   crop_size: 512
@@ -10,7 +15,7 @@ meta:
   feat_normed: false
   loss_mode: 'l2'  # l2 or smooth_l1
   weights: null  # required for dinov3; local path or URL
-  predictor_type: gated_self_attention  # gated_self_attention (legacy) | neighbor_masked_cross_attention
+  predictor_type: neighbor_masked_cross_attention  # gated_self_attention (legacy) | neighbor_masked_cross_attention
   neighbor_masked_attention:
     mask_radius: 1
     num_heads: 12
@@ -20,12 +25,6 @@ meta:
     use_query_pos: true
   gated_attention:
     enabled: false
-    mode: multiplication  # multiplication, residual, or memory
-    positions: [attn_output]  # pre_qkv, q, k, v, attn_output, proj_output, or [all]
-    granularity: elementwise  # elementwise, headwise, or token
-    activation: sigmoid
-    init_bias: 0.0
-    memory_type: self  # self (original) | patch_mean (image-level mean as gate reference)
 
 logging:
   folder: logs/${data.data_name}/${app.meta.model}${oc.select:diy_name,""}
