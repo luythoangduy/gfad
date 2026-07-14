@@ -83,11 +83,12 @@ class NeighborMaskedCrossAttention(nn.Module):
         v = self.v_proj(context).view(B, N, self.num_heads, self.head_dim).transpose(1, 2)
 
         attn = (q @ k.transpose(-2, -1)) * self.scale  # [B, H, N, N]
-        # masked_fill replaces (not biases) blocked scores with a constant,
-        # so masked context tokens get exactly zero gradient, not just a
-        # near-zero softmax weight.
-        mask_value = torch.finfo(attn.dtype).min
-        attn = attn.masked_fill(neighbor_mask, mask_value)
+        # masked_fill replaces (not biases) blocked scores with -inf, so
+        # masked context tokens get exactly zero softmax weight and exactly
+        # zero gradient. This relies on the caller guaranteeing that no row
+        # is fully masked (see NeighborMaskedCrossAttentionPredictor
+        # `_build_geometry`), otherwise softmax([-inf, ..., -inf]) is NaN.
+        attn = attn.masked_fill(neighbor_mask, float("-inf"))
         attn = attn.softmax(dim=-1)
         attn = self.attn_drop(attn)
 
@@ -111,7 +112,10 @@ class NeighborMaskedCrossAttentionBlock(nn.Module):
     ) -> None:
         super().__init__()
         self.norm_query = norm_layer(dim)
-        self.norm_context = norm_layer(dim)
+        # `context` is normalized exactly once, in the predictor's shared
+        # context stream (see NeighborMaskedCrossAttentionPredictor.forward);
+        # blocks do not re-normalize it, to avoid a redundant stacked
+        # LayerNorm on data that never changes across blocks.
         self.attn = NeighborMaskedCrossAttention(
             dim=dim, num_heads=num_heads, qkv_bias=qkv_bias, attn_drop=attn_drop, proj_drop=proj_drop
         )
@@ -124,7 +128,7 @@ class NeighborMaskedCrossAttentionBlock(nn.Module):
         )
 
     def forward(self, query: torch.Tensor, context: torch.Tensor, neighbor_mask: torch.Tensor) -> torch.Tensor:
-        query = query + self.attn(self.norm_query(query), self.norm_context(context), neighbor_mask)
+        query = query + self.attn(self.norm_query(query), context, neighbor_mask)
         query = query + self.mlp(self.norm_mlp(query))
         return query
 
@@ -157,9 +161,11 @@ class NeighborMaskedCrossAttentionPredictor(nn.Module):
         feat_normed: bool = False,
         norm_layer=nn.LayerNorm,
         init_std: float = 0.02,
-        **kwargs,
     ) -> None:
         super().__init__()
+        if not isinstance(mask_radius, int) or mask_radius < 0:
+            raise ValueError(f"mask_radius must be a non-negative integer, got {mask_radius!r}")
+
         # `num_patches` is only a construction-time hint (e.g. for logging or
         # eager weight init order); some encoders report a default-resolution
         # patch count here that does not match the token count actually
@@ -227,7 +233,16 @@ class NeighborMaskedCrossAttentionPredictor(nn.Module):
             pos_embed = get_2d_sincos_pos_embed(self.predictor_embed_dim, grid_size)
             self.query_pos_embed = torch.from_numpy(pos_embed).float().unsqueeze(0).to(device=device)
 
-        self.neighbor_mask = build_neighbor_mask(N, self.mask_radius).to(device=device)
+        neighbor_mask = build_neighbor_mask(N, self.mask_radius)
+        if neighbor_mask.all(dim=-1).any():
+            raise ValueError(
+                f"mask_radius={self.mask_radius} masks every context token for at least "
+                f"one query on a {grid_size}x{grid_size} grid (N={N}); no valid context "
+                f"tokens would remain, which would make softmax degenerate to a uniform "
+                f"(leaking) distribution over the masked tokens. Reduce mask_radius or "
+                f"increase the token grid resolution."
+            )
+        self.neighbor_mask = neighbor_mask.to(device=device)
         self._geometry_N = N
         self.num_patches = N
 

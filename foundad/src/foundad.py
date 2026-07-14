@@ -66,9 +66,12 @@ class VisionModule(nn.Module):
                 use_query_pos=nm_cfg.get("use_query_pos", True),
                 feat_normed=feat_normed,
             )
-            self._init_predictor(self.predictor)
-            # gated_attention_projector and RoPE are only defined for the
-            # legacy self-attention predictor and must not be applied here.
+            # NeighborMaskedCrossAttentionPredictor already fully initializes
+            # its own weights in __init__; do not call _init_predictor here,
+            # it would just re-init every Linear/LayerNorm a second time and
+            # muddy reproducibility. gated_attention_projector and RoPE are
+            # only defined for the legacy self-attention predictor and must
+            # not be applied here either.
         else:
             self.predictor = vit.__dict__["vit_predictor"](num_patches=self.num_patches, embed_dim=self.embed_dim,
                                                              predictor_embed_dim=pred_emb_dim, depth=pred_depth, if_pe=if_pe, feat_normed=feat_normed)

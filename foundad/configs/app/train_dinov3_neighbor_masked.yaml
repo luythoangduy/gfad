@@ -27,5 +27,12 @@ meta:
     enabled: false
 
 logging:
-  folder: logs/${data.data_name}/${app.meta.model}${oc.select:diy_name,""}
+  # Deliberately distinct from train_dinov3.yaml's folder: the two
+  # predictors have different architectures/state_dicts, so they must never
+  # share a checkpoint directory (train-step*.pth.tar / params.yaml would
+  # otherwise silently overwrite each other across runs). Override
+  # `neighbor_masked_attention.mask_radius` for ablations and this path
+  # picks up the new radius automatically; `diy_name` still adds further
+  # disambiguation on top (e.g. diy_name=_seed1).
+  folder: logs/${data.data_name}/${app.meta.model}_neighbor_masked_r${app.meta.neighbor_masked_attention.mask_radius}${oc.select:diy_name,""}
   write_tag: train

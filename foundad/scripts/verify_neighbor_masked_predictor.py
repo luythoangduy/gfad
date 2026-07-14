@@ -1,6 +1,8 @@
 """Sanity checks for NeighborMaskedCrossAttentionPredictor.
 
 Run with: python -m scripts.verify_neighbor_masked_predictor
+(On CPU-only machines, pin BLAS threads to avoid oversubscription stalls:
+ OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 python -m scripts.verify_neighbor_masked_predictor)
 
 Checks:
   1. Output shape matches [B, N, encoder_dim].
@@ -8,6 +10,11 @@ Checks:
   3. Critical leakage check: d(prediction_i)/d(z_j) == 0 for every j in the
      mask_radius neighborhood of i (including j == i), and is generally
      nonzero for at least one j outside that neighborhood.
+  4. Runtime token count N is re-derived per call, tolerating a stale/wrong
+     construction-time num_patches hint.
+  5. mask_radius validation: invalid or fully-blanketing radii raise instead
+     of letting softmax silently degenerate to a uniform (leaking)
+     distribution over masked tokens.
 """
 
 import math
@@ -103,6 +110,36 @@ def check_num_patches_mismatch_is_tolerated():
     print("[OK] predictor tolerates num_patches hint != actual runtime N, and re-derives geometry per call")
 
 
+def check_mask_radius_validation():
+    """A mask_radius that is invalid, or large enough to block every context
+    token for some query, must raise instead of silently letting softmax
+    degenerate to a uniform distribution over masked (leaking) tokens."""
+    for bad_radius in [-1, 1.5, "1"]:
+        try:
+            NeighborMaskedCrossAttentionPredictor(
+                num_patches=16, embed_dim=8, predictor_embed_dim=8, depth=1, num_heads=2,
+                mask_radius=bad_radius,
+            )
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"expected ValueError for mask_radius={bad_radius!r}")
+
+    # 4x4 grid (N=16): mask_radius=10 covers every token from every query.
+    predictor = NeighborMaskedCrossAttentionPredictor(
+        num_patches=16, embed_dim=8, predictor_embed_dim=8, depth=1, num_heads=2, mask_radius=10,
+    )
+    z = torch.randn(1, 16, 8)
+    try:
+        predictor(z)
+    except ValueError as e:
+        assert "masks every context token" in str(e), f"unexpected error message: {e}"
+    else:
+        raise AssertionError("expected ValueError when mask_radius blanks out all context for a query")
+
+    print("[OK] mask_radius validation rejects invalid/degenerate radii instead of silently leaking")
+
+
 def check_mask_shape():
     for N, radius in [(16, 1), (64, 0), (1024, 1)]:
         grid = math.isqrt(N)
@@ -117,5 +154,6 @@ if __name__ == "__main__":
     check_shape_and_finiteness()
     check_no_leakage()
     check_num_patches_mismatch_is_tolerated()
+    check_mask_radius_validation()
     check_mask_shape()
     print("All checks passed.")
