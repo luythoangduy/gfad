@@ -160,6 +160,11 @@ class NeighborMaskedCrossAttentionPredictor(nn.Module):
         **kwargs,
     ) -> None:
         super().__init__()
+        # `num_patches` is only a construction-time hint (e.g. for logging or
+        # eager weight init order); some encoders report a default-resolution
+        # patch count here that does not match the token count actually
+        # produced at the configured crop_size. The real grid geometry is
+        # always (re)derived from the runtime N in `forward`, never assumed.
         self.num_patches = num_patches
         self.embed_dim = embed_dim
         self.predictor_embed_dim = predictor_embed_dim
@@ -174,15 +179,12 @@ class NeighborMaskedCrossAttentionPredictor(nn.Module):
 
         # -- query stream (never derived from z)
         self.mask_token = nn.Parameter(torch.zeros(1, 1, predictor_embed_dim))
-        if use_query_pos:
-            pos_embed = get_2d_sincos_pos_embed(predictor_embed_dim, math.isqrt(num_patches))
-            pos_embed = torch.from_numpy(pos_embed).float().unsqueeze(0)  # [1, N, D]
-            self.register_buffer("query_pos_embed", pos_embed, persistent=False)
-        else:
-            self.query_pos_embed = None
 
-        neighbor_mask = build_neighbor_mask(num_patches, mask_radius)
-        self.register_buffer("neighbor_mask", neighbor_mask, persistent=False)
+        # Placeholders; `_build_geometry` fills these in with the correct
+        # size, dtype and device the first time `forward` sees a given N.
+        self.register_buffer("query_pos_embed", torch.zeros(1, 1, predictor_embed_dim), persistent=False)
+        self.register_buffer("neighbor_mask", torch.zeros(1, 1, dtype=torch.bool), persistent=False)
+        self._geometry_N: Optional[int] = None
 
         self.blocks = nn.ModuleList(
             [
@@ -213,6 +215,22 @@ class NeighborMaskedCrossAttentionPredictor(nn.Module):
             nn.init.constant_(m.bias, 0)
             nn.init.constant_(m.weight, 1.0)
 
+    def _build_geometry(self, N: int) -> None:
+        """(Re)build the fixed position embedding and neighbor mask for a
+        token grid of size N, on whatever device the module currently lives
+        on. Both buffers are non-persistent (derived, not learned), so this
+        can safely run again whenever N changes across calls."""
+        grid_size = math.isqrt(N)
+        device = self.mask_token.device
+
+        if self.use_query_pos:
+            pos_embed = get_2d_sincos_pos_embed(self.predictor_embed_dim, grid_size)
+            self.query_pos_embed = torch.from_numpy(pos_embed).float().unsqueeze(0).to(device=device)
+
+        self.neighbor_mask = build_neighbor_mask(N, self.mask_radius).to(device=device)
+        self._geometry_N = N
+        self.num_patches = N
+
     def forward(self, z: torch.Tensor) -> torch.Tensor:
         B, N, _ = z.shape
 
@@ -222,11 +240,8 @@ class NeighborMaskedCrossAttentionPredictor(nn.Module):
                 f"NeighborMaskedCrossAttentionPredictor requires a square token grid; "
                 f"got N={N}, which is not a perfect square."
             )
-        if N != self.num_patches:
-            raise ValueError(
-                f"NeighborMaskedCrossAttentionPredictor was built for num_patches="
-                f"{self.num_patches} but received N={N} tokens."
-            )
+        if self._geometry_N != N:
+            self._build_geometry(N)
 
         # -- context stream: independent per-token projection of z, no mixing
         context = self.context_norm(self.context_embed(z))
