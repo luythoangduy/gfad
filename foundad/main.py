@@ -34,7 +34,8 @@ def process_main(rank: int, cfg_dict: dict, world_size: int):
     dev_str = devices[rank]
     os.environ["CUDA_VISIBLE_DEVICES"] = str(dev_str.split(":")[-1])
 
-    params = cfg_dict.get("app", {}) # model config
+    import copy
+    params = copy.deepcopy(cfg_dict.get("app", {})) # model config
 
     params.update(cfg_dict)
 
