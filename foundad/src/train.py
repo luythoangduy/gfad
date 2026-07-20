@@ -118,15 +118,16 @@ class Trainer:
             if access_token and access_token != "YOUR_WANDB_API_KEY":
                 wandb.login(key=access_token)
             wandb_config = OmegaConf.to_container(
-                args,
+                OmegaConf.create(args),
                 resolve=True,
                 throw_on_missing=False,
             )
+            wcfg_resolved = wandb_config.get("wandb", {})
 
             wandb.init(
-                project=wcfg.get("project", "foundad"),
-                entity=wcfg.get("entity"),
-                name=wcfg.get("name"),
+                project=wcfg_resolved.get("project", "foundad"),
+                entity=wcfg_resolved.get("entity"),
+                name=wcfg_resolved.get("name"),
                 config=wandb_config,
             )
 
