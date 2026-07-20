@@ -164,13 +164,21 @@ class Trainer:
                 self.csv_logger.log(ep+1, itr, loss.item(), t)
                 if self.use_wandb:
                     import wandb
-                    wandb.log({
+                    log_dict = {
                         "train/loss": loss.item(),
                         "train/time_ms": t,
                         "epoch": ep + 1,
                         "step": gstep,
                         "lr": self.optimizer.param_groups[0]["lr"]
-                    })
+                    }
+                    if grad_stats:
+                        log_dict.update({
+                            "train/grad_min": grad_stats.min,
+                            "train/grad_max": grad_stats.max,
+                            "train/grad_first_layer": grad_stats.first_layer,
+                            "train/grad_last_layer": grad_stats.last_layer,
+                        })
+                    wandb.log(log_dict)
                 if itr % 100 == 0:
                     logger.info("[E %d I %d] loss %.6f (avg %.6f) mem %.2fMB (%.1fms)", ep+1, itr, loss.item(), loss_m.avg, torch.cuda.max_memory_allocated()/1024**2, time_m.avg)
                     if grad_stats:
