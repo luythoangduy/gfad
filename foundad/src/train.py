@@ -15,6 +15,7 @@ from src.utils.logging import CSVLogger, gpu_timer, grad_logger, AverageMeter
 from src.datasets.dataset import build_dataloader
 from src.utils.synthesis import CutPasteUnion
 from src.foundad import VisionModule
+from omegaconf import OmegaConf
 
 _GLOBAL_SEED = 0
 random.seed(42); np.random.seed(0); torch.manual_seed(0)
@@ -116,11 +117,17 @@ class Trainer:
             access_token = wcfg.get("access_token")
             if access_token and access_token != "YOUR_WANDB_API_KEY":
                 wandb.login(key=access_token)
+            wandb_config = OmegaConf.to_container(
+                args,
+                resolve=True,
+                throw_on_missing=False,
+            )
+
             wandb.init(
                 project=wcfg.get("project", "foundad"),
                 entity=wcfg.get("entity"),
                 name=wcfg.get("name"),
-                config=args
+                config=wandb_config,
             )
 
     def _loss_fn(self, h, p) -> torch.Tensor:
