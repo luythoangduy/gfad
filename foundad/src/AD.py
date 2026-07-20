@@ -68,6 +68,26 @@ def _evaluate_single_ckpt(ckpt: Path, cfg: Dict[str, Any]) -> None:
     
     logger.info(f"Evaluating {ckpt.name} on {dataset_name}")
     
+    wcfg = cfg.get("wandb", {})
+    use_wandb = wcfg.get("enabled", False)
+    if use_wandb:
+        import wandb
+        access_token = wcfg.get("access_token")
+        if access_token and access_token != "YOUR_WANDB_API_KEY":
+            wandb.login(key=access_token)
+        
+        wandb_name = wcfg.get("name")
+        if wandb_name:
+            wandb_name = f"{wandb_name}_eval"
+            
+        wandb.init(
+            project=wcfg.get("project", "foundad"),
+            entity=wcfg.get("entity"),
+            name=wandb_name,
+            config=cfg,
+            job_type="eval"
+        )
+
     os.makedirs(Path(cfg["logging"]["folder"]), exist_ok=True)
     csv_path = Path(cfg["logging"]["folder"]) / f"{cfg['logging']['write_tag']}_eval.csv"
     csv_logger = CSVLogger(
@@ -129,6 +149,14 @@ def _evaluate_single_ckpt(ckpt: Path, cfg: Dict[str, Any]) -> None:
         logger.info("%s | AUROC_i %.4f | AUPR_i %.4f | AUROC_p %.4f | PRO-AUC %.4f",
                     cls, inst["auroc"], inst["aupr"], pix["auroc"], pro)
         csv_logger.log(ckpt.name, cls, inst["auroc"], inst["aupr"], pix["auroc"], pro)
+        
+        if use_wandb:
+            wandb.log({
+                f"test/AUROC_i/{cls}": inst["auroc"],
+                f"test/AUPR_i/{cls}": inst["aupr"],
+                f"test/AUROC_p/{cls}": pix["auroc"],
+                f"test/PRO-AUC/{cls}": pro,
+            })
 
         inst_auc.append(inst["auroc"]); inst_aupr.append(inst["aupr"])
         pix_auc.append(pix["auroc"]);   pro_auc.append(pro)
@@ -144,6 +172,15 @@ def _evaluate_single_ckpt(ckpt: Path, cfg: Dict[str, Any]) -> None:
                 np.mean(inst_auc), np.mean(inst_aupr), np.mean(pix_auc), np.mean(pro_auc))
     csv_logger.log(ckpt.name, "Mean", np.mean(inst_auc), np.mean(inst_aupr),
                    np.mean(pix_auc), np.mean(pro_auc))
+    
+    if use_wandb:
+        wandb.log({
+            "test/Mean_AUROC_i": np.mean(inst_auc),
+            "test/Mean_AUPR_i": np.mean(inst_aupr),
+            "test/Mean_AUROC_p": np.mean(pix_auc),
+            "test/Mean_PRO-AUC": np.mean(pro_auc),
+        })
+        wandb.finish()
     
 
 @torch.inference_mode()

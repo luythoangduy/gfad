@@ -164,6 +164,8 @@ class GateUnit(nn.Module):
             "std": detached.std(unbiased=False).item(),
             "min": detached.min().item(),
             "max": detached.max().item(),
+            "abs_mean": detached.abs().mean().item(),
+            "saturation_ratio": (detached.abs() > 0.95).float().mean().item(),
         }
 
     def forward(

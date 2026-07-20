@@ -178,6 +178,21 @@ class Trainer:
                             "train/grad_first_layer": grad_stats.first_layer,
                             "train/grad_last_layer": grad_stats.last_layer,
                         })
+                        
+                    gate_stats = []
+                    for m in self.model.predictor.modules():
+                        if hasattr(m, 'last_gate_stats') and m.last_gate_stats is not None:
+                            gate_stats.append(m.last_gate_stats)
+                    if gate_stats:
+                        log_dict.update({
+                            "train/gate_mean": np.mean([s["mean"] for s in gate_stats]),
+                            "train/gate_std": np.mean([s["std"] for s in gate_stats]),
+                            "train/gate_min": np.min([s["min"] for s in gate_stats]),
+                            "train/gate_max": np.max([s["max"] for s in gate_stats]),
+                            "train/gate_abs_mean": np.mean([s["abs_mean"] for s in gate_stats]),
+                            "train/gate_saturation_ratio": np.mean([s["saturation_ratio"] for s in gate_stats]),
+                        })
+                        
                     wandb.log(log_dict)
                 if itr % 100 == 0:
                     logger.info("[E %d I %d] loss %.6f (avg %.6f) mem %.2fMB (%.1fms)", ep+1, itr, loss.item(), loss_m.avg, torch.cuda.max_memory_allocated()/1024**2, time_m.avg)
