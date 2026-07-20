@@ -30,3 +30,10 @@ meta:
 logging:
   folder: logs/${data.data_name}/${app.meta.model}${oc.select:diy_name,""}
   write_tag: train
+
+wandb:
+  enabled: true
+  project: "foundad"
+  entity: null
+  access_token: "YOUR_WANDB_API_KEY"
+  name: null

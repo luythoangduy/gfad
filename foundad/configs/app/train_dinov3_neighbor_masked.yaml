@@ -36,3 +36,10 @@ logging:
   # disambiguation on top (e.g. diy_name=_seed1).
   folder: logs/${data.data_name}/${app.meta.model}_neighbor_masked_r${app.meta.neighbor_masked_attention.mask_radius}${oc.select:diy_name,""}
   write_tag: train
+
+wandb:
+  enabled: true
+  project: "foundad"
+  entity: null
+  access_token: "YOUR_WANDB_API_KEY"
+  name: null

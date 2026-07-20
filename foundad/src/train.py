@@ -108,6 +108,21 @@ class Trainer:
             ("%d", "time (ms)"),
         )
 
+        # ---------- wandb ----------
+        wcfg = args.get("wandb", {})
+        self.use_wandb = wcfg.get("enabled", False)
+        if self.use_wandb:
+            import wandb
+            access_token = wcfg.get("access_token")
+            if access_token and access_token != "YOUR_WANDB_API_KEY":
+                wandb.login(key=access_token)
+            wandb.init(
+                project=wcfg.get("project", "foundad"),
+                entity=wcfg.get("entity"),
+                name=wcfg.get("name"),
+                config=args
+            )
+
     def _loss_fn(self, h, p) -> torch.Tensor:
         if self.loss_mode == 'l2':
             return F.mse_loss(h.flatten(0,1), p.flatten(0,1), reduction="mean")
@@ -146,6 +161,15 @@ class Trainer:
                 loss_m.update(loss.item()); time_m.update(t); gstep += 1
                 if gstep % 100 == 0: self._save_ckpt(ep, gstep)
                 self.csv_logger.log(ep+1, itr, loss.item(), t)
+                if self.use_wandb:
+                    import wandb
+                    wandb.log({
+                        "train/loss": loss.item(),
+                        "train/time_ms": t,
+                        "epoch": ep + 1,
+                        "step": gstep,
+                        "lr": self.optimizer.param_groups[0]["lr"]
+                    })
                 if itr % 100 == 0:
                     logger.info("[E %d I %d] loss %.6f (avg %.6f) mem %.2fMB (%.1fms)", ep+1, itr, loss.item(), loss_m.avg, torch.cuda.max_memory_allocated()/1024**2, time_m.avg)
                     if grad_stats:
@@ -167,6 +191,10 @@ class Trainer:
                 gstep,
                 self.max_steps,
             )
+        
+        if self.use_wandb:
+            import wandb
+            wandb.finish()
 
 def main(args: Dict[str, Any]) -> None:
     if args is None:
