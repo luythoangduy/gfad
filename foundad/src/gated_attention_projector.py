@@ -42,8 +42,8 @@ def _canonical_position(position: str) -> str:
 
 
 def _normalize_gate_specs(config: Mapping[str, Any]) -> List[GateSpec]:
-    default_mode = str(config.get("mode", config.get("integration_mode", "multiplication"))).lower()
-    default_granularity = str(config.get("granularity", "elementwise")).lower()
+    default_mode = str(config.get("mode", config.get("integration_mode", "residual"))).lower()
+    default_granularity = str(config.get("granularity", "token")).lower()
     raw_positions = config.get("positions", ["attn_output"])
 
     if isinstance(raw_positions, str):
@@ -82,6 +82,25 @@ def _normalize_gate_specs(config: Mapping[str, Any]) -> List[GateSpec]:
 
 
 class GateUnit(nn.Module):
+    """
+    Identity-safe gate for anomaly-detection reconstruction.
+
+    Modes
+    -----
+    multiplication:
+        y = x * sigmoid(g(x))
+        Use a positive init_bias, e.g. 4.0, to start near identity.
+
+    residual:
+        y = x + x * tanh(g(x))
+        With zero-initialized projection, starts exactly as y = x.
+
+    memory:
+        Disabled by default because directly mixing raw memory with
+        projected attention representations can create representation
+        mismatch and information leakage.
+    """
+
     def __init__(
         self,
         dim: int,
@@ -91,24 +110,38 @@ class GateUnit(nn.Module):
         init_bias: float = 0.0,
     ) -> None:
         super().__init__()
+
         if granularity not in {"elementwise", "headwise", "token"}:
             raise ValueError(f"Unsupported granularity: {granularity}")
+
+        if mode not in SUPPORTED_GATE_MODES:
+            raise ValueError(f"Unsupported gate mode: {mode}")
+
         self.mode = mode
         self.granularity = granularity
         self.activation = activation
+
+        # In this attention implementation:
+        # - elementwise: one gate per channel
+        # - token: one scalar per token and per head
+        # - headwise: currently behaves like token unless explicitly pooled
         out_dim = dim if granularity == "elementwise" else 1
+
         if mode == "memory":
-            self.keep_proj = nn.Linear(dim, out_dim)
-            self.write_proj = nn.Linear(dim, out_dim)
-            self.candidate_proj = nn.Linear(dim, dim)
-            nn.init.zeros_(self.keep_proj.weight)
-            nn.init.constant_(self.keep_proj.bias, init_bias)
-            nn.init.zeros_(self.write_proj.weight)
-            nn.init.constant_(self.write_proj.bias, init_bias)
-        else:
-            self.proj = nn.Linear(dim, out_dim)
-            nn.init.zeros_(self.proj.weight)
-            nn.init.constant_(self.proj.bias, init_bias)
+            raise ValueError(
+                "The 'memory' gate is disabled for anomaly detection. "
+                "It mixes raw memory features with projected attention "
+                "features and may preserve anomalous target-token information. "
+                "Use 'residual' or 'multiplication'."
+            )
+
+        self.proj = nn.Linear(dim, out_dim)
+
+        # Zero initialization is exactly identity for residual+tanh.
+        nn.init.zeros_(self.proj.weight)
+        nn.init.constant_(self.proj.bias, init_bias)
+
+        self.last_gate_stats: Optional[Dict[str, float]] = None
 
     def _activate(self, gate: Tensor) -> Tensor:
         if self.activation == "sigmoid":
@@ -119,22 +152,43 @@ class GateUnit(nn.Module):
             return torch.nn.functional.silu(gate)
         if self.activation == "identity":
             return gate
-        raise ValueError(f"Unsupported gated_attention.activation: {self.activation}")
 
-    def forward(self, x: Tensor, memory: Optional[Tensor] = None) -> Tensor:
-        if self.mode == "memory":
-            memory = x if memory is None else memory
-            keep = torch.sigmoid(self.keep_proj(memory))
-            write = torch.sigmoid(self.write_proj(memory))
-            candidate = torch.tanh(self.candidate_proj(x))
-            return keep * memory + write * candidate
+        raise ValueError(
+            f"Unsupported gated_attention.activation: {self.activation}"
+        )
 
-        gate = self._activate(self.proj(x))
+    def _save_stats(self, gate: Tensor) -> None:
+        detached = gate.detach().float()
+        self.last_gate_stats = {
+            "mean": detached.mean().item(),
+            "std": detached.std(unbiased=False).item(),
+            "min": detached.min().item(),
+            "max": detached.max().item(),
+        }
+
+    def forward(
+        self,
+        x: Tensor,
+        memory: Optional[Tensor] = None,
+    ) -> Tensor:
+        logits = self.proj(x)
+
         if self.mode == "multiplication":
+            gate = torch.sigmoid(logits)
+            self._save_stats(gate)
             return x * gate
+
         if self.mode == "residual":
-            return x + (x * gate)
-        raise ValueError(f"Unsupported gated attention mode: {self.mode}")
+            # Important:
+            # tanh(0) = 0, therefore zero initialization gives:
+            # output = x + x * 0 = x
+            gate = torch.tanh(logits)
+            self._save_stats(gate)
+            return x + x * gate
+
+        raise ValueError(
+            f"Unsupported gated attention mode: {self.mode}"
+        )
 
 
 def rotate_half(x: Tensor) -> Tensor:
@@ -206,7 +260,7 @@ class GatedSelfAttention(nn.Module):
         gate_specs: Optional[Iterable[GateSpec]] = None,
         activation: str = "sigmoid",
         init_bias: float = 0.0,
-        use_rope: bool = True,
+        use_rope: bool = False,
         rope_base: float = 10000.0,
         max_position_embeddings: int = 2048,
         memory_type: str = "self",
@@ -264,7 +318,7 @@ class GatedSelfAttention(nn.Module):
             gate_specs=specs,
             activation=str(config.get("activation", "sigmoid")).lower(),
             init_bias=float(config.get("init_bias", 0.0)),
-            use_rope=bool(config.get("use_rope", config.get("rope", True))),
+            use_rope=bool(config.get("use_rope", config.get("rope", False))),
             rope_base=float(config.get("rope_base", config.get("rope_theta", 10000.0))),
             max_position_embeddings=int(
                 config.get("max_position_embeddings", config.get("rope_max_position_embeddings", 2048))
